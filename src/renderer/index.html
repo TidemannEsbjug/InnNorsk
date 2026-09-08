@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="nb">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data:;" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InnNorsk</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="blotter">
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">
+          <span class="mark-tray"></span>
+        </div>
+        <div>
+          <p class="eyebrow">Lokal dokumentoversetter</p>
+          <h1>InnNorsk</h1>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span id="key-pill" class="pill warn">Mangler API-nøkkel</span>
+        <button type="button" class="ghost" id="btn-settings">Innstillinger</button>
+      </div>
+    </header>
+
+    <main class="desk">
+      <section class="tray inn">
+        <div class="tray-lip">Inn-kurv</div>
+        <div class="tray-body">
+          <p class="tray-kicker">Mappen Grok skal lese</p>
+          <h2 id="in-path" class="path">Ingen mappe valgt</h2>
+          <p class="hint">Legg Word, PDF, PowerPoint, Excel eller tekstfiler i mappen. Originalene blir liggende.</p>
+          <div class="row">
+            <button type="button" class="paper" id="btn-pick-in">Velg inn-mappe</button>
+            <button type="button" class="paper quiet" id="btn-open-in">Åpne</button>
+          </div>
+          <dl class="stats">
+            <div>
+              <dt>Dokumenter</dt>
+              <dd id="stat-count">0</dd>
+            </div>
+            <div>
+              <dt>Allerede oversatt</dt>
+              <dd id="stat-done">0</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="press">
+        <button type="button" class="stamp" id="btn-translate">
+          <span class="stamp-pad">Oversett til norsk</span>
+          <span class="stamp-sub" id="stamp-sub">Stempler ut-kurven</span>
+        </button>
+        <button type="button" class="cancel hidden" id="btn-cancel">Avbryt</button>
+        <p class="press-note" id="press-note">Norske filer lander i ut-kurven. Ingenting lastes opp unntatt teksten Grok trenger.</p>
+      </section>
+
+      <section class="tray ut">
+        <div class="tray-lip">Ut-kurv</div>
+        <div class="tray-body">
+          <p class="tray-kicker">Oversatte dokumenter</p>
+          <h2 id="out-path" class="path">oversatt/</h2>
+          <div class="row">
+            <button type="button" class="paper" id="btn-pick-out">Velg ut-mappe</button>
+            <button type="button" class="paper quiet" id="btn-open-out">Åpne</button>
+          </div>
+          <ul class="jobs" id="job-list">
+            <li class="empty">Tomt. Velg en inn-mappe for å se dokumentene.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <aside id="drawer" class="drawer" hidden>
+    <div class="drawer-scrim" id="drawer-scrim"></div>
+    <div class="drawer-panel" role="dialog" aria-labelledby="settings-title">
+      <header>
+        <p class="eyebrow">Skuff</p>
+        <h2 id="settings-title">Innstillinger</h2>
+      </header>
+
+      <label>
+        <span>xAI API-nøkkel</span>
+        <input id="field-key" type="password" autocomplete="off" spellcheck="false" placeholder="xai-…" />
+        <small>Hent nøkkel på <a href="#" id="link-console">console.x.ai</a>. Den lagres bare på denne maskinen.</small>
+      </label>
+
+      <div class="split">
+        <label>
+          <span>Modell</span>
+          <select id="field-model">
+            <option value="grok-4.6">grok-4.6</option>
+            <option value="grok-4.5">grok-4.5</option>
+            <option value="grok-4.3">grok-4.3</option>
+          </select>
+        </label>
+        <label>
+          <span>Målspråk</span>
+          <select id="field-lang">
+            <option value="bokmal">Bokmål</option>
+            <option value="nynorsk">Nynorsk</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="check">
+        <input type="checkbox" id="field-skip" checked />
+        <span>Hopp over filer som allerede ligger i ut-kurven</span>
+      </label>
+
+      <div class="drawer-actions">
+        <button type="button" class="paper" id="btn-test">Test tilkobling</button>
+        <button type="button" class="paper quiet" id="btn-save">Lagre</button>
+      </div>
+      <p class="status" id="settings-status"></p>
+    </div>
+  </aside>
+
+  <script src="app.js"></script>
+</body>
+</html>

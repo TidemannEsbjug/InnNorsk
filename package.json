@@ -1,0 +1,23 @@
+{
+  "name": "innnorsk",
+  "productName": "InnNorsk",
+  "version": "1.0.0",
+  "description": "Oversett dokumenter til norsk med Grok, lokalt på Windows.",
+  "main": "src/main.js",
+  "author": "InnNorsk",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site\"",
+    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site\""
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "pdf-parse": "^1.1.1",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "electron": "^35.1.5",
+    "electron-packager": "^17.1.2"
+  }
+}

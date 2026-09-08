@@ -1,0 +1,11 @@
+InnNorsk for Windows
+====================
+
+1. Dobbeltklikk InnNorsk.exe
+2. Windows SmartScreen kan vise en advarsel fordi appen ikke er digitalt signert.
+   Klikk "Mer info" og deretter "Kjør likevel".
+3. Åpne Innstillinger og lim inn xAI API-nøkkelen din fra https://console.x.ai
+4. Velg inn-mappe, trykk det røde stemplet "Oversett til norsk".
+
+Oversatte filer havner i mappen "oversatt" (eller den ut-mappen du velger).
+Originalene blir ikke endret.

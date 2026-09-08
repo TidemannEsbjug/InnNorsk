@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="nb">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InnNorsk — last ned til Windows</title>
+  <link rel="icon" href="icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@400;500;600;700&family=Literata:opsz,wght@7..72,400;7..72,600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --harbor: #0e2a3a;
+      --signal: #e24a2a;
+      --signal-ink: #8f2614;
+      --brass: #c4a574;
+      --paper: #f4efe4;
+      --mist: #d7e4ea;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Familjen Grotesk", system-ui, sans-serif;
+      background: var(--harbor);
+      color: var(--paper);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: 56px 24px 80px;
+    }
+    .eyebrow {
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--brass);
+      font-size: 12px;
+      margin: 0 0 10px;
+    }
+    h1 {
+      font-size: clamp(42px, 8vw, 76px);
+      letter-spacing: -0.05em;
+      line-height: 0.92;
+      margin: 0 0 16px;
+    }
+    .lede {
+      font-family: "Literata", Georgia, serif;
+      font-size: 22px;
+      line-height: 1.4;
+      max-width: 22ch;
+      margin: 0 0 36px;
+      color: var(--mist);
+    }
+    .stamp {
+      display: inline-block;
+      text-decoration: none;
+      color: var(--paper);
+      background: radial-gradient(circle at 30% 20%, #ff6a4a, var(--signal) 55%, #c4331c);
+      border: 7px solid var(--signal-ink);
+      padding: 18px 28px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      box-shadow: 0 10px 0 var(--signal-ink);
+      transform: translateY(-4px);
+    }
+    .stamp:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--signal-ink); }
+    .shot {
+      display: block;
+      width: 100%;
+      border-radius: 12px;
+      margin: 8px 0 40px;
+      box-shadow: 0 24px 50px rgba(0,0,0,0.35);
+    }
+    .meta { margin: 14px 0 48px; color: var(--mist); opacity: 0.75; font-size: 14px; }
+    ol {
+      counter-reset: step;
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 14px;
+    }
+    li {
+      background: #143445;
+      border: 1px solid rgba(196,165,116,0.28);
+      padding: 18px 20px 18px 72px;
+      position: relative;
+    }
+    li::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 18px;
+      top: 18px;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: var(--brass);
+      color: var(--harbor);
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+    }
+    li strong { display: block; font-size: 18px; margin-bottom: 4px; }
+    li span { color: var(--mist); }
+    a.inline { color: #ffb4a4; }
+    footer { margin-top: 48px; color: var(--brass); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <p class="eyebrow">Windows-app · xAI Grok</p>
+    <h1>Dokumenter inn.<br>Norsk ut.</h1>
+    <p class="lede">InnNorsk oversetter Word, PDF, PowerPoint, Excel og tekstfiler til bokmål eller nynorsk. Filene blir på maskinen din. Grok får bare teksten som skal oversettes.</p>
+    <a class="stamp" href="https://github.com/TidemannEsbjug/InnNorsk/releases/latest/download/InnNorsk-Windows.zip">Last ned for Windows</a>
+    <p class="meta">Zip-fil · Windows 10/11 · 64-bit · API-nøkkel fylles inn etter installasjon</p>
+    <img class="shot" src="screenshot-app.png" alt="InnNorsk med inn-kurv, oversett-stempel og ut-kurv" />
+    <ol>
+      <li>
+        <strong>Pakk ut og kjør</strong>
+        <span>Dobbeltklikk <em>InnNorsk.exe</em>. Hvis Windows advarer, velg Mer info → Kjør likevel. Appen er usignert, ikke farlig av den grunn.</span>
+      </li>
+      <li>
+        <strong>Lim inn xAI-nøkkelen</strong>
+        <span>Åpne Innstillinger i appen. Hent nøkkel på <a class="inline" href="https://console.x.ai">console.x.ai</a> og lim den inn. Den lagres bare lokalt.</span>
+      </li>
+      <li>
+        <strong>Velg mappe og stemple</strong>
+        <span>Legg dokumentene i en mappe, velg den som inn-kurv, og trykk det røde stemplet. Ferdige filer lander i ut-kurven.</span>
+      </li>
+    </ol>
+    <footer>InnNorsk · oversetter med Grok via api.x.ai</footer>
+  </div>
+</body>
+</html>
