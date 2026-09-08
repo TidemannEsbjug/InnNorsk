@@ -37,42 +37,94 @@ const STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </w:docDefaults>
 </w:styles>`;
 
-function inlineFromText(text) {
-  const lines = String(text).split("\n");
+function mapFont(name) {
+  const raw = String(name || "").replace(/^[A-Z]{6}\+/, "");
+  const n = raw.toLowerCase();
+  if (n.includes("times")) return "Times New Roman";
+  if (n.includes("courier")) return "Courier New";
+  if (n.includes("helvetica") || n.includes("arial")) return "Arial";
+  if (n.includes("georgia")) return "Georgia";
+  if (n.includes("garamond")) return "Garamond";
+  if (n.includes("calibri")) return "Calibri";
+  if (n.includes("cambria")) return "Cambria";
+  if (n.includes("verdana")) return "Verdana";
+  if (n.includes("tahoma")) return "Tahoma";
+  if (n.includes("trebuchet")) return "Trebuchet MS";
+  if (n.includes("palatino")) return "Palatino Linotype";
+  if (n.includes("garamond")) return "Garamond";
+  if (n.includes("bookman")) return "Bookman Old Style";
+  if (n.includes("century")) return "Century Schoolbook";
+  const cleaned = raw.replace(/[-,]?(Bold|Italic|Oblique|Regular|Medium|Light|Roman|Black|SemiBold).*$/i, "").trim();
+  return cleaned || "Calibri";
+}
+
+function halfPoints(fontSizePt) {
+  const pt = Number(fontSizePt) || 11;
+  return Math.max(16, Math.min(192, Math.round(pt * 2)));
+}
+
+function rPrXml(style = {}) {
+  const font = escapeXml(mapFont(style.fontName));
+  const sz = halfPoints(style.fontSize);
+  return `<w:rPr>
+      <w:rFonts w:ascii="${font}" w:hAnsi="${font}" w:cs="${font}"/>
+      <w:sz w:val="${sz}"/>
+      <w:szCs w:val="${sz}"/>
+      ${style.bold ? "<w:b/><w:bCs/>" : ""}
+      ${style.italic ? "<w:i/><w:iCs/>" : ""}
+    </w:rPr>`;
+}
+
+function inlineFromText(text, style) {
+  const pr = rPrXml(style);
+  const lines = String(text ?? "").split("\n");
   return lines
     .map((line, i) => {
       const t = `<w:t xml:space="preserve">${escapeXml(line)}</w:t>`;
-      return i === 0
-        ? `<w:r>${t}</w:r>`
-        : `<w:r><w:br/></w:r><w:r>${t}</w:r>`;
+      if (i === 0) return `<w:r>${pr}${t}</w:r>`;
+      return `<w:r>${pr}<w:br/></w:r><w:r>${pr}${t}</w:r>`;
     })
     .join("");
 }
 
-function paragraphXml(text, compact) {
-  const spacing = compact
-    ? `<w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>`
-    : `<w:pPr><w:spacing w:before="0" w:after="160" w:line="276" w:lineRule="auto"/></w:pPr>`;
-  if (text == null || text === "") {
-    return `<w:p>${spacing}</w:p>`;
-  }
-  return `<w:p>${spacing}${inlineFromText(text)}</w:p>`;
+function normalizePara(p) {
+  if (p == null) return { text: "" };
+  if (typeof p === "string") return { text: p };
+  return p;
 }
 
-function documentXml(paragraphs, compact) {
+function paragraphXml(raw, compact) {
+  const p = normalizePara(raw);
+  const after = p.spaceAfter != null ? p.spaceAfter : compact ? 0 : 160;
+  const before = p.spaceBefore != null ? p.spaceBefore : 0;
+  const line = p.lineTwips != null ? p.lineTwips : compact ? 240 : 276;
+  const align = p.align && p.align !== "left" ? `<w:jc w:val="${p.align}"/>` : "";
+  const spacing = `<w:pPr>${align}<w:spacing w:before="${before}" w:after="${after}" w:line="${line}" w:lineRule="auto"/></w:pPr>`;
+  if (!p.text) return `<w:p>${spacing}</w:p>`;
+  return `<w:p>${spacing}${inlineFromText(p.text, p)}</w:p>`;
+}
+
+function ptToTwips(pt) {
+  return Math.round(Number(pt) * 20);
+}
+
+function documentXml(paragraphs, compact, page) {
   const body = paragraphs.map((p) => paragraphXml(p, compact)).join("");
+  const w = page && page.widthPt ? ptToTwips(page.widthPt) : 11906;
+  const h = page && page.heightPt ? ptToTwips(page.heightPt) : 16838;
+  const m = page && page.marginPt != null ? ptToTwips(page.marginPt) : 1134;
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-  <w:body>${body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134"/></w:sectPr></w:body>
+  <w:body>${body}<w:sectPr><w:pgSz w:w="${w}" w:h="${h}"/><w:pgMar w:top="${m}" w:right="${m}" w:bottom="${m}" w:left="${m}"/></w:sectPr></w:body>
 </w:document>`;
 }
 
-async function buildSimpleDocx(paragraphs, { compact } = {}) {
+async function buildSimpleDocx(paragraphs, { compact, page } = {}) {
   const zip = new JSZip();
   zip.file("[Content_Types].xml", CONTENT_TYPES);
   zip.folder("_rels").file(".rels", RELS);
   const word = zip.folder("word");
-  word.file("document.xml", documentXml(paragraphs.filter((p) => p != null), compact));
+  word.file("document.xml", documentXml(paragraphs.filter((p) => p != null), compact, page));
   word.file("styles.xml", STYLES);
   word.folder("_rels").file("document.xml.rels", DOC_RELS);
   return zip.generateAsync({
@@ -81,4 +133,4 @@ async function buildSimpleDocx(paragraphs, { compact } = {}) {
   });
 }
 
-module.exports = { buildSimpleDocx, inlineFromText };
+module.exports = { buildSimpleDocx, inlineFromText, mapFont };

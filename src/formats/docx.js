@@ -42,7 +42,7 @@ function collectParagraphs(xml) {
   return paras;
 }
 
-function firstRunFormattedText(translated, sampleAttrs) {
+function formattedTextNodes(translated, sampleAttrs) {
   const attrs = sampleAttrs || "";
   const withSpace = attrs.includes("xml:space") ? attrs : `${attrs} xml:space="preserve"`;
   const lines = String(translated).split("\n");
@@ -54,26 +54,60 @@ function firstRunFormattedText(translated, sampleAttrs) {
     .join("");
 }
 
-function replaceParagraphText(paraXml, translated) {
-  const tRe = /<w:t\b[^>]*>[\s\S]*?<\/w:t>/g;
-  const matches = [...paraXml.matchAll(tRe)];
-  if (!matches.length) return paraXml;
+function runTextLength(runXml) {
+  return paragraphPlainText(runXml).replace(/\s/g, "").length;
+}
 
-  const attrMatch = matches[0][0].match(/^<w:t([^>]*)>/);
+function replaceParagraphText(paraXml, translated) {
+  const runRe = /<w:r\b[\s\S]*?<\/w:r>/g;
+  const runs = [...paraXml.matchAll(runRe)];
+  if (!runs.length) return paraXml;
+
+  let best = 0;
+  let bestLen = -1;
+  runs.forEach((run, i) => {
+    const len = runTextLength(run[0]);
+    if (len > bestLen) {
+      bestLen = len;
+      best = i;
+    }
+  });
+
+  const tRe = /<w:t\b[^>]*>[\s\S]*?<\/w:t>/g;
+  const bestRun = runs[best][0];
+  const tMatches = [...bestRun.matchAll(tRe)];
+  if (!tMatches.length) return paraXml;
+
+  const attrMatch = tMatches[0][0].match(/^<w:t([^>]*)>/);
   const attrs = attrMatch ? attrMatch[1] : "";
+  let runOut = "";
   let cursor = 0;
-  let rebuilt = "";
-  matches.forEach((match, i) => {
-    rebuilt += paraXml.slice(cursor, match.index);
-    if (i === 0) {
-      rebuilt += firstRunFormattedText(translated, attrs);
-    } else {
-      const innerAttr = match[0].match(/^<w:t([^>]*)>/);
-      const a = innerAttr ? innerAttr[1] : "";
+  tMatches.forEach((match, i) => {
+    runOut += bestRun.slice(cursor, match.index);
+    if (i === 0) runOut += formattedTextNodes(translated, attrs);
+    else {
+      const a = (match[0].match(/^<w:t([^>]*)>/) || [])[1] || "";
       const withSpace = a.includes("xml:space") ? a : `${a} xml:space="preserve"`;
-      rebuilt += `<w:t${withSpace}></w:t>`;
+      runOut += `<w:t${withSpace}></w:t>`;
     }
     cursor = match.index + match[0].length;
+  });
+  runOut += bestRun.slice(cursor);
+
+  let rebuilt = "";
+  cursor = 0;
+  runs.forEach((run, i) => {
+    rebuilt += paraXml.slice(cursor, run.index);
+    if (i === best) {
+      rebuilt += runOut;
+    } else {
+      rebuilt += run[0].replace(tRe, (full) => {
+        const a = (full.match(/^<w:t([^>]*)>/) || [])[1] || "";
+        const withSpace = a.includes("xml:space") ? a : `${a} xml:space="preserve"`;
+        return `<w:t${withSpace}></w:t>`;
+      });
+    }
+    cursor = run.index + run[0].length;
   });
   rebuilt += paraXml.slice(cursor);
   return rebuilt;

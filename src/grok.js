@@ -135,6 +135,7 @@ async function translateStrings({ apiKey, model, targetLanguage, strings, onProg
       `Du er en profesjonell oversetter til ${label}.`,
       "Oversett hvert element i JSON-arrayen til naturlig, idiomatisk norsk.",
       "Behold layouten: samme antall linjeskift, tomme linjer, tabulatorer og innrykk som i kilden.",
+      "Direkte oversettelse. Ikke omskriv, ikke forkort, ikke utvid, og ikke endre typografi.",
       "Ikke slå sammen avsnitt eller linjer. Ikke legg til markdown, punktlister eller overskrifter som ikke finnes i kilden.",
       "Behold tall, egennavn, e-postadresser, URL-er, koder og markup uendret når de ikke er vanlig språk.",
       "Ikke legg til forklaringer. Ikke hopp over elementer.",

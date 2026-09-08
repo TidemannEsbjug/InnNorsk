@@ -1,7 +1,7 @@
 {
   "name": "innnorsk",
   "productName": "InnNorsk",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Oversett dokumenter til norsk med Grok, lokalt på Windows.",
   "main": "src/main.js",
   "author": "InnNorsk",
@@ -14,6 +14,7 @@
   "dependencies": {
     "jszip": "^3.10.1",
     "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^3.11.174",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
