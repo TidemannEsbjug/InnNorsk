@@ -72,7 +72,7 @@ async function translateHtml(buffer, ctx) {
     const raw = m[1];
     if (!raw.trim() || !/[A-Za-zÀ-ÿ]/.test(raw)) continue;
     slots.push({ start: m.index + 1, end: m.index + 1 + raw.length, raw });
-    blocks.push(raw.replace(/\s+/g, " ").trim());
+    blocks.push(raw);
   }
   if (!blocks.length) {
     const translated = await translateDocumentText({ ...ctx, text: html });
@@ -90,8 +90,8 @@ async function translateHtml(buffer, ctx) {
 async function translateRtfToDocx(buffer, ctx) {
   const text = stripRtf(buffer.toString("utf8"));
   const translated = await translateDocumentText({ ...ctx, text });
-  const paragraphs = translated.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
-  return buildSimpleDocx(paragraphs.length ? paragraphs : [translated]);
+  const paragraphs = translated.replace(/\r\n/g, "\n").split("\n");
+  return buildSimpleDocx(paragraphs.length ? paragraphs : [translated], { compact: true });
 }
 
 module.exports = {

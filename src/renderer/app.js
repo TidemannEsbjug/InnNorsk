@@ -142,7 +142,7 @@ $("btn-test").addEventListener("click", async () => {
     const r = await api.testApi();
     els.settingsStatus.textContent = r.ok
       ? "Tilkobling OK. Grok svarte."
-      : "Fikk ikke kontakt.";
+      : r.error || "Fikk ikke kontakt.";
   } catch (err) {
     els.settingsStatus.textContent = err.message || String(err);
   }

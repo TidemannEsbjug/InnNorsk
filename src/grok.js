@@ -30,16 +30,34 @@ function extractOutputText(data) {
   return "";
 }
 
+function sanitizeKey(apiKey) {
+  return String(apiKey || "")
+    .trim()
+    .replace(/^Bearer\s+/i, "")
+    .replace(/^["']|["']$/g, "")
+    .trim();
+}
+
+function apiErrorMessage(data, status) {
+  if (!data) return `xAI-feil ${status}`;
+  if (typeof data.error === "string" && data.error.trim()) return data.error;
+  if (data.error && typeof data.error.message === "string") return data.error.message;
+  if (typeof data.message === "string" && data.message.trim()) return data.message;
+  return `xAI-feil ${status}`;
+}
+
 async function grokRequest({ apiKey, model, input }) {
+  const key = sanitizeKey(apiKey);
   const res = await fetch("https://api.x.ai/v1/responses", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: `Bearer ${key}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
       model: model || "grok-4.6",
       input,
+      store: false,
       temperature: 0.15,
     }),
   });
@@ -53,10 +71,7 @@ async function grokRequest({ apiKey, model, input }) {
   }
 
   if (!res.ok) {
-    const msg =
-      (data && (data.error?.message || data.message)) ||
-      `xAI-feil ${res.status}`;
-    throw new Error(msg);
+    throw new Error(apiErrorMessage(data, res.status));
   }
 
   const text = extractOutputText(data).trim();
@@ -119,8 +134,10 @@ async function translateStrings({ apiKey, model, targetLanguage, strings, onProg
     const prompt = [
       `Du er en profesjonell oversetter til ${label}.`,
       "Oversett hvert element i JSON-arrayen til naturlig, idiomatisk norsk.",
-      "Behold tall, egennavn, e-postadresser, URL-er, koder og markdown/XML-tegn uendret når de ikke er vanlig språk.",
-      "Ikke legg til forklaringer. Ikke slå sammen eller hopp over elementer.",
+      "Behold layouten: samme antall linjeskift, tomme linjer, tabulatorer og innrykk som i kilden.",
+      "Ikke slå sammen avsnitt eller linjer. Ikke legg til markdown, punktlister eller overskrifter som ikke finnes i kilden.",
+      "Behold tall, egennavn, e-postadresser, URL-er, koder og markup uendret når de ikke er vanlig språk.",
+      "Ikke legg til forklaringer. Ikke hopp over elementer.",
       `Returner KUN et JSON-array med nøyaktig ${payload.length} strenger, i samme rekkefølge.`,
       "",
       JSON.stringify(payload, null, 2),
@@ -153,35 +170,38 @@ async function translateStrings({ apiKey, model, targetLanguage, strings, onProg
 }
 
 async function translateDocumentText({ apiKey, model, targetLanguage, text, onProgress }) {
-  const blocks = splitBlocks(text);
+  const source = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const trailing = source.match(/\n+$/);
+  const core = trailing ? source.slice(0, -trailing[0].length) : source;
+  const pieces = [];
+  const re = /(\n{2,})/g;
+  let last = 0;
+  let m;
+  while ((m = re.exec(core))) {
+    pieces.push({ kind: "text", value: core.slice(last, m.index) });
+    pieces.push({ kind: "sep", value: m[1] });
+    last = m.index + m[1].length;
+  }
+  pieces.push({ kind: "text", value: core.slice(last) });
+
+  const strings = pieces.filter((p) => p.kind === "text").map((p) => p.value);
   const translated = await translateStrings({
     apiKey,
     model,
     targetLanguage,
-    strings: blocks,
+    strings,
     onProgress,
   });
-  return translated.join("\n\n").replace(/\n{3,}/g, "\n\n").trim() + "\n";
-}
 
-function splitBlocks(text) {
-  const parts = String(text)
-    .replace(/\r\n/g, "\n")
-    .split(/\n{2,}/)
-    .map((p) => p.trimEnd());
-  const out = [];
-  let buf = "";
-  for (const p of parts) {
-    if (!p.trim()) continue;
-    if (buf && buf.length + p.length > 3500) {
-      out.push(buf);
-      buf = p;
-    } else {
-      buf = buf ? `${buf}\n\n${p}` : p;
-    }
+  let ti = 0;
+  let out = "";
+  for (const piece of pieces) {
+    if (piece.kind === "sep") out += piece.value;
+    else out += translated[ti++] ?? piece.value;
   }
-  if (buf) out.push(buf);
-  return out.length ? out : [text];
+  if (trailing) out += trailing[0];
+  else if (source.endsWith("\n")) out += "\n";
+  return out;
 }
 
 async function testConnection({ apiKey, model }) {

@@ -14,26 +14,44 @@ function isTranslatablePart(name) {
   return TEXT_FILES.some((re) => re.test(name));
 }
 
+function paragraphPlainText(block) {
+  let text = "";
+  const tokenRe = /<w:tab\b[^/]*\/>|<w:br\b[^/]*\/>|<w:cr\b[^/]*\/>|<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
+  let t;
+  while ((t = tokenRe.exec(block))) {
+    if (t[0].startsWith("<w:tab")) text += "\t";
+    else if (t[0].startsWith("<w:br") || t[0].startsWith("<w:cr")) text += "\n";
+    else text += decodeXmlEntities(t[1] || "");
+  }
+  return text;
+}
+
 function collectParagraphs(xml) {
   const paras = [];
   const re = /<w:p\b[\s\S]*?<\/w:p>/g;
   let m;
   while ((m = re.exec(xml))) {
     const block = m[0];
-    const texts = [];
-    const tRe = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g;
-    let t;
-    while ((t = tRe.exec(block))) {
-      texts.push(decodeXmlEntities(t[1]));
-    }
     paras.push({
       start: m.index,
       end: m.index + block.length,
       xml: block,
-      text: texts.join(""),
+      text: paragraphPlainText(block),
     });
   }
   return paras;
+}
+
+function firstRunFormattedText(translated, sampleAttrs) {
+  const attrs = sampleAttrs || "";
+  const withSpace = attrs.includes("xml:space") ? attrs : `${attrs} xml:space="preserve"`;
+  const lines = String(translated).split("\n");
+  return lines
+    .map((line, i) => {
+      const t = `<w:t${withSpace}>${escapeXml(line)}</w:t>`;
+      return i === 0 ? t : `<w:br/>${t}`;
+    })
+    .join("");
 }
 
 function replaceParagraphText(paraXml, translated) {
@@ -41,28 +59,24 @@ function replaceParagraphText(paraXml, translated) {
   const matches = [...paraXml.matchAll(tRe)];
   if (!matches.length) return paraXml;
 
-  let used = false;
-  let out = paraXml;
-  // Replace from the end so indexes stay valid if we rebuild via sequential replace.
-  // Simpler: rebuild by walking matches.
+  const attrMatch = matches[0][0].match(/^<w:t([^>]*)>/);
+  const attrs = attrMatch ? attrMatch[1] : "";
   let cursor = 0;
   let rebuilt = "";
   matches.forEach((match, i) => {
     rebuilt += paraXml.slice(cursor, match.index);
-    const full = match[0];
-    const attrMatch = full.match(/^<w:t([^>]*)>/);
-    const attrs = attrMatch ? attrMatch[1] : "";
-    const withSpace = attrs.includes("xml:space") ? attrs : `${attrs} xml:space="preserve"`;
     if (i === 0) {
-      rebuilt += `<w:t${withSpace}>${escapeXml(translated)}</w:t>`;
-      used = true;
+      rebuilt += firstRunFormattedText(translated, attrs);
     } else {
+      const innerAttr = match[0].match(/^<w:t([^>]*)>/);
+      const a = innerAttr ? innerAttr[1] : "";
+      const withSpace = a.includes("xml:space") ? a : `${a} xml:space="preserve"`;
       rebuilt += `<w:t${withSpace}></w:t>`;
     }
-    cursor = match.index + full.length;
+    cursor = match.index + match[0].length;
   });
   rebuilt += paraXml.slice(cursor);
-  return used ? rebuilt : paraXml;
+  return rebuilt;
 }
 
 async function translateDocxBuffer(buffer, ctx) {
@@ -72,7 +86,7 @@ async function translateDocxBuffer(buffer, ctx) {
   );
 
   for (const name of names) {
-    let xml = await zip.file(name).async("string");
+    const xml = await zip.file(name).async("string");
     const paras = collectParagraphs(xml);
     const indexes = [];
     const strings = [];
@@ -89,7 +103,6 @@ async function translateDocxBuffer(buffer, ctx) {
       strings,
     });
 
-    // Apply from the end of the file so offsets remain valid.
     const mapped = paras.map((p) => p.xml);
     indexes.forEach((paraIndex, n) => {
       mapped[paraIndex] = replaceParagraphText(paras[paraIndex].xml, translated[n]);

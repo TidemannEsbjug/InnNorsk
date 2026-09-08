@@ -100,8 +100,14 @@ ipcMain.handle("folder:open", async (_e, which) => {
 
 ipcMain.handle("api:test", async () => {
   const s = getSettings();
-  if (!s.apiKey) throw new Error("Lim inn xAI API-nøkkel under Innstillinger.");
-  return testConnection({ apiKey: s.apiKey, model: s.model });
+  if (!s.apiKey) {
+    return { ok: false, error: "Lim inn xAI API-nøkkel under Innstillinger." };
+  }
+  try {
+    return await testConnection({ apiKey: s.apiKey, model: s.model });
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
 });
 
 ipcMain.handle("job:cancel", () => {

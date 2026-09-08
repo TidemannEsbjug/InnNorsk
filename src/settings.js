@@ -61,7 +61,11 @@ function saveSettings(patch) {
   if (typeof patch.skipExisting === "boolean") next.skipExisting = patch.skipExisting;
 
   if (typeof patch.apiKey === "string") {
-    const key = patch.apiKey.trim();
+    const key = patch.apiKey
+      .trim()
+      .replace(/^Bearer\s+/i, "")
+      .replace(/^["']|["']$/g, "")
+      .trim();
     if (!key) {
       next.apiKeyEnc = null;
       next.apiKeyPlain = "";

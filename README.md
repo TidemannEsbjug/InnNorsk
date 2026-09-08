@@ -17,7 +17,7 @@ Nettside: https://tidemannesbjug.github.io/InnNorsk/
 
 Støttede filer: `.docx` `.pdf` `.pptx` `.xlsx` `.txt` `.md` `.csv` `.html` `.rtf`.
 
-PDF skrives ut som Word-dokument. Skannede PDF-er uten tekstlag kan ikke oversettes.
+PDF skrives ut som Word-dokument med samme linje- og avsnittsinndeling som teksten i PDF-en. Skannede PDF-er uten tekstlag kan ikke oversettes. Word og PowerPoint beholder avsnitt, linjeskift og stiler.
 
 ## Utvikling
 

@@ -6,23 +6,29 @@ function isSlidePart(name) {
   return /^ppt\/(slides|notesSlides)\/.+\.xml$/.test(name);
 }
 
+function paragraphPlainText(block) {
+  let text = "";
+  const tokenRe = /<a:br\b[^/]*\/>|<a:tab\b[^/]*\/>|<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g;
+  let t;
+  while ((t = tokenRe.exec(block))) {
+    if (t[0].startsWith("<a:br")) text += "\n";
+    else if (t[0].startsWith("<a:tab")) text += "\t";
+    else text += decodeXmlEntities(t[1] || "");
+  }
+  return text;
+}
+
 function collectParagraphs(xml) {
   const paras = [];
   const re = /<a:p\b[\s\S]*?<\/a:p>/g;
   let m;
   while ((m = re.exec(xml))) {
     const block = m[0];
-    const texts = [];
-    const tRe = /<a:t\b[^>]*>([\s\S]*?)<\/a:t>/g;
-    let t;
-    while ((t = tRe.exec(block))) {
-      texts.push(decodeXmlEntities(t[1]));
-    }
     paras.push({
       start: m.index,
       end: m.index + block.length,
       xml: block,
-      text: texts.join(""),
+      text: paragraphPlainText(block),
     });
   }
   return paras;
@@ -32,19 +38,24 @@ function replaceParagraphText(paraXml, translated) {
   const tRe = /<a:t\b[^>]*>[\s\S]*?<\/a:t>/g;
   const matches = [...paraXml.matchAll(tRe)];
   if (!matches.length) return paraXml;
+  const attrMatch = matches[0][0].match(/^<a:t([^>]*)>/);
+  const attrs = attrMatch ? attrMatch[1] : "";
+  const lines = String(translated).split("\n");
   let cursor = 0;
   let rebuilt = "";
   matches.forEach((match, i) => {
     rebuilt += paraXml.slice(cursor, match.index);
-    const full = match[0];
-    const attrMatch = full.match(/^<a:t([^>]*)>/);
-    const attrs = attrMatch ? attrMatch[1] : "";
     if (i === 0) {
-      rebuilt += `<a:t${attrs}>${escapeXml(translated)}</a:t>`;
+      rebuilt += lines
+        .map((line, li) => {
+          const t = `<a:t${attrs}>${escapeXml(line)}</a:t>`;
+          return li === 0 ? t : `</a:r><a:br/><a:r>${t}`;
+        })
+        .join("");
     } else {
       rebuilt += `<a:t${attrs}></a:t>`;
     }
-    cursor = match.index + full.length;
+    cursor = match.index + match[0].length;
   });
   rebuilt += paraXml.slice(cursor);
   return rebuilt;
@@ -57,7 +68,7 @@ async function translatePptxBuffer(buffer, ctx) {
   );
 
   for (const name of names) {
-    let xml = await zip.file(name).async("string");
+    const xml = await zip.file(name).async("string");
     const paras = collectParagraphs(xml);
     const indexes = [];
     const strings = [];
