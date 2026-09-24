@@ -1,0 +1,5 @@
+# Genereres av XcodeGen (xcodegen generate)
+InnNorskVarsel.xcodeproj/
+xcuserdata/
+DerivedData/
+*.xcuserstate

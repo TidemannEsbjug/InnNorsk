@@ -1,0 +1,44 @@
+# XcodeGen-oppsett: `xcodegen generate` i denne mappen lager InnNorskVarsel.xcodeproj.
+# Se README.md. Team velges i Xcode (eller legg DEVELOPMENT_TEAM inn lokalt under settings.base).
+name: InnNorskVarsel
+options:
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  InnNorskVarsel:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: InnNorskVarsel
+    entitlements:
+      path: InnNorskVarsel/InnNorskVarsel.entitlements
+      properties:
+        aps-environment: development
+    attributes:
+      SystemCapabilities:
+        com.apple.Push:
+          enabled: 1
+    scheme: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.innnorsk.varsel
+        PRODUCT_NAME: InnNorskVarsel
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_CFBundleDisplayName: InnNorsk
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+      configs:
+        Debug:
+          SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
