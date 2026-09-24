@@ -16,16 +16,16 @@
     "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site|server|web|test|data|Dockerfile|render.yaml\""
   },
   "dependencies": {
-    "express": "^5.2.1",
     "fast-xml-parser": "^5.11.1",
+    "hono": "^4.13.9",
     "jszip": "^3.10.1",
-    "pdf-parse": "^1.1.1",
-    "pdfjs-dist": "^3.11.174",
+    "unpdf": "^1.8.1",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "electron": "^35.1.5",
-    "electron-packager": "^17.1.2"
+    "electron-packager": "^17.1.2",
+    "wrangler": "^4.138.0"
   },
   "engines": {
     "node": ">=22.13"

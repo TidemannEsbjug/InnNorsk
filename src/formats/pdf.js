@@ -102,21 +102,35 @@ function linesToParagraphs(lines, pageWidth) {
   return paras;
 }
 
+// unpdf = pdf.js bygget for serverløse miljøer; virker både i Cloudflare Workers og Node/Electron.
 async function extractPdfLayout(buffer) {
-  const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
-  const data = new Uint8Array(buffer);
-  const loading = pdfjs.getDocument({
-    data,
+  const { getDocumentProxy } = await import("unpdf");
+  const pdf = await getDocumentProxy(new Uint8Array(buffer), {
     useSystemFonts: true,
     isEvalSupported: false,
     verbosity: 0,
   });
-  const pdf = await loading.promise;
   const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
+    // Fontenes ekte navn (f.eks. "ABCDEF+Calibri-Bold") finnes først etter at siden er tolket.
+    await page.getOperatorList();
+    const realNames = new Map();
+    const realName = (id) => {
+      if (!realNames.has(id)) {
+        let name = "";
+        try {
+          const font = page.commonObjs.get(id);
+          name = (font && (font.name || font.loadedName)) || "";
+        } catch {
+          /* ukjent font: fall tilbake til pdf.js sin id */
+        }
+        realNames.set(id, name || id || "");
+      }
+      return realNames.get(id);
+    };
     const items = [];
     for (const it of content.items) {
       if (!it.str) continue;
@@ -127,7 +141,7 @@ async function extractPdfLayout(buffer) {
         y: tr[5],
         width: it.width || 0,
         fontSize: fontSizeOf(it),
-        fontName: it.fontName || "",
+        fontName: realName(it.fontName),
       });
     }
     pages.push({
@@ -135,7 +149,9 @@ async function extractPdfLayout(buffer) {
       height: viewport.height,
       lines: clusterLines(items),
     });
+    page.cleanup();
   }
+  if (typeof pdf.destroy === "function") await pdf.destroy();
   return pages;
 }
 
