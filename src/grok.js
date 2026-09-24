@@ -119,9 +119,40 @@ function cancelledError() {
   return new GrokError("cancelled", "Oversettelsen ble avbrutt.");
 }
 
-async function grokRequest({ apiKey, model, input, baseUrl, signal, timeoutMs, onCall, items, attempt }) {
-  const key = sanitizeKey(apiKey);
-  if (!key) throw new GrokError("no_key", "Mangler xAI API-nøkkel.");
+// Alternativ transport, f.eks. Grok Build CLI på Mac-en i stedet for HTTP-API-et:
+// transport(input, { signal, timeoutMs, model }) -> { text, usage?, costUsd? }.
+// Feil bør være GrokError; andre feil regnes som nettverksfeil (prøves på nytt).
+async function viaTransport({ transport, model, input, signal, timeoutMs }, report) {
+  const req = requestSignal(signal, timeoutMs || DEFAULT_TIMEOUT_MS);
+  let out;
+  try {
+    out = await transport(input, { signal: req.signal, timeoutMs: timeoutMs || DEFAULT_TIMEOUT_MS, model });
+  } catch (err) {
+    let error = err;
+    if (signal && signal.aborted) error = cancelledError();
+    else if (req.signal.reason instanceof GrokError) error = req.signal.reason;
+    else if (!(err instanceof GrokError)) {
+      error = new GrokError("network", `Grok svarte ikke (${err.message}).`, { cause: err });
+    }
+    report({ ok: false, status: error.status || 0, outputChars: 0, error: error.message, code: error.code });
+    throw error;
+  } finally {
+    req.done();
+  }
+  const text = String((out && out.text) || "").trim();
+  report({
+    ok: Boolean(text),
+    status: 200,
+    outputChars: text.length,
+    usage: (out && out.usage) || null,
+    costUsd: out && typeof out.costUsd === "number" ? out.costUsd : undefined,
+  });
+  if (!text) throw new GrokError("bad_response", "Tomt svar fra Grok.");
+  return text;
+}
+
+async function grokRequest(ctx) {
+  const { apiKey, model, input, baseUrl, signal, timeoutMs, onCall, items, attempt, transport } = ctx;
   if (signal && signal.aborted) throw cancelledError();
   const t0 = Date.now();
   const report = (extra) => {
@@ -129,6 +160,9 @@ async function grokRequest({ apiKey, model, input, baseUrl, signal, timeoutMs, o
       onCall({ attempt: attempt || 1, items: items || 0, inputChars: input.length, ms: Date.now() - t0, ...extra });
     }
   };
+  if (transport) return viaTransport(ctx, report);
+  const key = sanitizeKey(apiKey);
+  if (!key) throw new GrokError("no_key", "Mangler xAI API-nøkkel.");
   const req = requestSignal(signal, timeoutMs || DEFAULT_TIMEOUT_MS);
   let res;
   let raw;
@@ -418,7 +452,7 @@ async function translateDocumentText(ctx) {
   return out;
 }
 
-async function testConnection({ apiKey, model, baseUrl, signal, onCall }) {
+async function testConnection({ apiKey, model, baseUrl, signal, onCall, transport, timeoutMs }) {
   const t0 = Date.now();
   const text = await grokRequest({
     apiKey,
@@ -426,7 +460,8 @@ async function testConnection({ apiKey, model, baseUrl, signal, onCall }) {
     baseUrl,
     signal,
     onCall,
-    timeoutMs: 60000,
+    transport,
+    timeoutMs: timeoutMs || 60000,
     input: "Svar med nøyaktig ett ord: OK. Ingen annen tekst.",
   });
   return { ok: true, sample: text.slice(0, 80), ms: Date.now() - t0 };

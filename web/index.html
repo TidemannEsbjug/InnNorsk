@@ -10,7 +10,7 @@
   <link rel="apple-touch-icon" href="/img/icon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Figtree:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Fraunces:opsz,wght,SOFT@9..144,500..650,50&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,500..650,50&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/app.css" />
   <script type="module" src="/js/app.js"></script>
 </head>
@@ -157,7 +157,7 @@
 
       <p class="heartbeat" id="heartbeat">
         <span class="beat" aria-hidden="true"></span>
-        Sist oppdatert: <span id="hb-time">akkurat nå</span>
+        <span>Sist oppdatert: <span id="hb-time">akkurat nå</span></span>
       </p>
       <div class="notice notice-warn" id="lost" role="alert" hidden>
         <p><strong>Mistet kontakten med serveren – prøver igjen …</strong></p>
@@ -181,9 +181,7 @@
 
     <!-- Når oversettelsen er ferdig -->
     <section class="card done" id="done" aria-labelledby="done-title" hidden>
-      <div class="done-mark" id="done-mark" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M6 12.5l4 4 8-9" /></svg>
-      </div>
+      <div class="done-mark" id="done-mark" aria-hidden="true"></div>
       <h2 id="done-title" tabindex="-1"></h2>
       <p class="lead" id="done-lead"></p>
       <ul class="results" id="results"></ul>
@@ -191,7 +189,7 @@
         <a class="btn btn-secondary" id="zip-link" href="#" download hidden>Last ned alle (.zip)</a>
         <button type="button" class="btn btn-primary" id="btn-again">Oversett flere dokumenter</button>
       </div>
-      <p class="muted center">Du finner dem også under «Mine dokumenter» lenger ned.</p>
+      <p class="muted center" id="done-hint">Du finner dem også under «Mine dokumenter» lenger ned.</p>
     </section>
 
     <section class="card mine" id="mine" aria-labelledby="mine-title" tabindex="-1">
@@ -210,6 +208,7 @@
   <dialog class="modal" id="pw-dialog" aria-labelledby="pw-title">
     <form class="modal-body" id="pw-form" novalidate>
       <h2 id="pw-title">Bytt passord</h2>
+      <p class="hint" id="pw-lead" hidden>Du logget inn med et midlertidig passord. Lag ditt eget, så er du i gang.</p>
       <div class="field">
         <label for="pw-current">Passordet du bruker nå</label>
         <input type="password" id="pw-current" autocomplete="current-password" required />

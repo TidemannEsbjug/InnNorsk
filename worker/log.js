@@ -65,3 +65,22 @@ export async function logEvent(env, level, type, message, data, ctx = {}) {
     logLine(env, { ts, level: "error", type: "log.write_failed", msg: String(err && err.message) });
   }
 }
+
+// Én rad i grok_calls per HTTP-forsøk (brukes av estimatoren og admin). meta: { jobId, fileId, model }.
+export function grokCallRow(meta, call) {
+  const usage = call.usage || {};
+  const details = usage.output_tokens_details || usage.completion_tokens_details || {};
+  const inputTokens = usage.input_tokens || usage.prompt_tokens || 0;
+  const outputTokens = usage.output_tokens || usage.completion_tokens || 0;
+  return {
+    inputTokens,
+    outputTokens,
+    statement: [
+      `INSERT INTO grok_calls (ts, job_id, file_id, model, status, ok, attempt, items, input_chars, output_chars, ms,
+         input_tokens, output_tokens, reasoning_tokens, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      nowIso(), meta.jobId || null, meta.fileId || null, meta.model, call.status, call.ok ? 1 : 0, call.attempt,
+      call.items, call.inputChars, call.outputChars, call.ms, inputTokens, outputTokens, details.reasoning_tokens || 0,
+      call.error || null,
+    ],
+  };
+}

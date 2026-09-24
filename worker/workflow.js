@@ -6,7 +6,7 @@ import core from "../src/core.js";
 import grok from "../src/grok.js";
 import { config } from "./config.js";
 import { one, all, run, batch, nowIso } from "./db.js";
-import { logEvent } from "./log.js";
+import { logEvent, grokCallRow } from "./log.js";
 import { keys, getJson, putJson, getOriginal, putOutput, deleteWork } from "./storage.js";
 import { CHUNK_SIZE } from "./estimate.js";
 
@@ -26,12 +26,15 @@ function parseStepError(err) {
   return { code: m ? m[1] : "unknown", raw };
 }
 
+// Det brukeren ser. Tekniske detaljer (koder, xAI-svar) ligger i error/error_details for admin.
 function userMessage(code) {
-  if (AUTH_CODES.has(code)) return "Oversettelsen stoppet fordi tjenesten ikke fikk tilgang til xAI. Kontakt administrator.";
-  if (code === "invalid_output") return "Kunne ikke oversettes: den oversatte filen ble ugyldig. Feilen er logget.";
+  if (AUTH_CODES.has(code)) {
+    return "Oversettelsen stoppet på grunn av et problem hos oss – ikke noe du har gjort. Gi beskjed til den som ga deg tilgang, så ordner vi det.";
+  }
+  if (code === "invalid_output") return "Kunne ikke oversettes: den oversatte filen ble ikke gyldig. Feilen er logget.";
   if (code === "unreadable") return "Kunne ikke oversettes: filen kunne ikke leses.";
-  if (code === "bad_response") return "Kunne ikke oversettes: Grok ga et svar vi ikke kunne bruke. Prøv igjen senere.";
-  if (RETRYABLE_CODES.has(code)) return "Kunne ikke oversettes: xAI svarte ikke som det skulle. Prøv igjen senere.";
+  if (code === "bad_response") return "Kunne ikke oversettes denne gangen. Prøv gjerne igjen litt senere.";
+  if (RETRYABLE_CODES.has(code)) return "Kunne ikke oversettes fordi oversettelsestjenesten ikke svarte. Prøv gjerne igjen litt senere.";
   return "Kunne ikke oversettes på grunn av en uventet feil. Feilen er logget.";
 }
 
@@ -90,20 +93,12 @@ async function prepareFile(env, fileId) {
 }
 
 async function recordCall(env, file, call) {
-  const usage = call.usage || {};
-  const inputTokens = usage.input_tokens || usage.prompt_tokens || 0;
-  const outputTokens = usage.output_tokens || usage.completion_tokens || 0;
-  const details = usage.output_tokens_details || usage.completion_tokens_details || {};
+  const row = grokCallRow({ jobId: file.job_id, fileId: file.id, model: file.model }, call);
   await batch(env, [
-    [
-      `INSERT INTO grok_calls (ts, job_id, file_id, model, status, ok, attempt, items, input_chars, output_chars, ms,
-         input_tokens, output_tokens, reasoning_tokens, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      nowIso(), file.job_id, file.id, file.model, call.status, call.ok ? 1 : 0, call.attempt, call.items,
-      call.inputChars, call.outputChars, call.ms, inputTokens, outputTokens, details.reasoning_tokens || 0, call.error || null,
-    ],
+    row.statement,
     [
       "UPDATE jobs SET calls = calls + 1, input_tokens = input_tokens + ?, output_tokens = output_tokens + ? WHERE id = ?",
-      inputTokens, outputTokens, file.job_id,
+      row.inputTokens, row.outputTokens, file.job_id,
     ],
   ]);
   if (!call.ok) {
@@ -176,9 +171,11 @@ async function translateChunk(env, fileId, list) {
   const failed = results.find((r) => r.status === "rejected");
   if (failed) {
     const err = failed.reason;
-    // Feil som ikke hjelper å prøve igjen (nøkkel, ugyldig svar) avslutter filen med en gang.
-    if (err instanceof grok.GrokError && !err.retryable) throw tagged(err.code, err.message);
-    throw err;
+    if (!(err instanceof grok.GrokError)) throw err;
+    // Feil som ikke hjelper å prøve igjen (nøkkel, ugyldig svar) avslutter filen med en gang;
+    // de andre prøves på nytt av Workflowen, med koden i meldingen til slutt.
+    if (!err.retryable) throw tagged(err.code, err.message);
+    throw new Error(`[${err.code}] ${err.message}`);
   }
   return { translated: todo.length };
 }

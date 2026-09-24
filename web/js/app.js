@@ -17,6 +17,8 @@ const SKIP_REASONS = {
   type: "Filtyper som ikke kan oversettes.",
   empty: "Tomme filer.",
   duplicate: "Filer du allerede har lagt til.",
+  big: () => `Filer som er større enn ${state.limits.maxFileMb} MB.`,
+  many: () => `Flere enn ${state.limits.maxFilesPerJob} dokumenter på en gang. Oversett gjerne resten etterpå.`,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -44,6 +46,7 @@ const state = {
   spoken: "",
   documents: [],
   lastVisit: recall(LAST_VISIT),
+  limits: { maxFileMb: 30, maxFilesPerJob: 100 }, // oppdateres fra serveren ved oppstart
 };
 
 // ---------- Små hjelpere ----------
@@ -107,7 +110,9 @@ function skipReason(path, file, known) {
   if (parts.some((p) => p.startsWith(".")) || /^(thumbs\.db|desktop\.ini)$/i.test(name)) return "hidden";
   if (!SUPPORTED.includes(extOf(name))) return "type";
   if (file.size === 0) return "empty";
+  if (file.size > state.limits.maxFileMb * 1024 * 1024) return "big";
   if (known.has(path.toLowerCase())) return "duplicate";
+  if (known.size >= state.limits.maxFilesPerJob) return "many";
   return null;
 }
 
@@ -150,7 +155,10 @@ function renderSkipped(skipped, added) {
     h("p", null,
       h("strong", null, total === 1 ? "Én fil ble ikke lagt til." : `${total} filer ble ikke lagt til.`),
       added ? " Resten er lagt til som vanlig." : ""),
-    h("ul", null, reasons.map((r) => h("li", null, SKIP_REASONS[r], " ", h("span", { class: "muted" }, names(skipped[r]))))),
+    h("ul", null, reasons.map((r) => {
+      const why = typeof SKIP_REASONS[r] === "function" ? SKIP_REASONS[r]() : SKIP_REASONS[r];
+      return h("li", null, why, " ", h("span", { class: "muted" }, names(skipped[r])));
+    })),
     skipped.type ? h("p", { class: "muted" }, "Dette kan oversettes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekstfiler (.txt, .md, .csv), nettsider (.html) og RTF.") : null
   );
   box.hidden = false;
@@ -219,7 +227,7 @@ function dropUpload(item) {
 
 function showUploadProgress(item, pct) {
   item.pct = pct;
-  if (item.fill) item.fill.style.transform = `scaleX(${pct / 100})`;
+  if (item.fill) item.fill.style.width = `${pct}%`;
   if (item.label) item.label.textContent = uploadText(item);
 }
 
@@ -342,17 +350,14 @@ function fileRow(file) {
         : `Klar – tar ${formatDuration(file.estimateSeconds)}`),
       failed ? h("p", { class: "file-hint" }, "Det blir ikke med i oversettelsen. Du kan fjerne det fra listen.") : null
     ),
-    h("button", {
-      type: "button", class: "icon-btn", "aria-label": `Fjern ${file.name}`, title: "Fjern",
-      onclick: (e) => removeFile(file, e.currentTarget),
-    }, icon("close"))
+    removeButton(file.name, (e) => removeFile(file, e.currentTarget))
   );
 }
 
 function uploadRow(item) {
   const error = item.status === "error";
   item.fill = h("span", { class: "mini-fill" });
-  item.fill.style.transform = `scaleX(${item.pct / 100})`;
+  item.fill.style.width = `${item.pct}%`;
   item.label = h("p", { class: "file-meta" }, uploadText(item));
   return h("li", { class: `file is-${item.status}` },
     extBadge(item.path),
@@ -565,11 +570,11 @@ function renderWorking() {
   if (!running) fill($("now"), "Dokumentene står i kø og blir tatt straks.");
   else if (current) {
     fill($("now"), "Nå: ", h("strong", null, baseName(current.name)),
-      state.files.length > 1 && index ? ` (dokument ${index} av ${state.files.length})` : "");
+      state.files.length > 1 && index ? ` (dokument\u00a0${index}\u00a0av\u00a0${state.files.length})` : "");
   } else fill($("now"), "Gjør klar neste dokument …");
 
   $("bar").setAttribute("aria-valuenow", String(pct));
-  $("bar-fill").style.transform = `scaleX(${pct / 100})`;
+  $("bar-fill").style.width = `${pct}%`;
   $("pct").textContent = `${pct} %`;
   $("eta").textContent = etaText(job);
   $("eta-hint").hidden = !(running && job.eta && job.eta.confidence === "lav");
@@ -626,10 +631,10 @@ function resultRow(job, file) {
       }, icon("download"), "Last ned")
     );
   }
-  const why = file.status === "failed"
-    ? file.message || file.error || "Dette dokumentet kunne ikke oversettes."
-    : "Ble ikke oversatt fordi oversettelsen ble avbrutt.";
-  return h("li", { class: "result is-failed" },
+  // Samme melding som overskriften (f.eks. når hele jobben stoppet) gjentas ikke på hver fil.
+  const message = file.message && file.message !== job.error ? file.message : "Ble ikke oversatt.";
+  const why = file.status === "failed" ? message : "Ble ikke oversatt fordi oversettelsen ble avbrutt.";
+  return h("li", { class: `result is-${file.status === "failed" ? "failed" : "cancelled"}` },
     extBadge(file.name),
     h("div", { class: "file-main" },
       h("p", { class: "file-name" }, baseName(file.path || file.name)),
@@ -666,8 +671,10 @@ function renderDone() {
   $("done-title").textContent = text[0];
   $("done-lead").textContent = text[1];
   $("done-mark").className = `done-mark is-${job.status}`;
+  $("done-mark").replaceChildren(icon(done.length ? "check" : "info"));
   const sorted = [...done, ...files.filter((f) => f.status !== "done")];
   fill($("results"), sorted.map((f) => resultRow(job, f)));
+  $("done-hint").hidden = !done.length;
   const zip = $("zip-link");
   zip.hidden = done.length < 2;
   zip.href = jobUrl(job.id, "/download.zip");
@@ -779,6 +786,15 @@ function welcomeBack() {
 
 // ---------- Bytt passord ----------
 
+function openPasswordDialog(required) {
+  $("pw-form").reset();
+  for (const id of ["pw-current", "pw-new", "pw-repeat"]) $(id).type = "password";
+  $("pw-error").hidden = true;
+  $("pw-ok").hidden = true;
+  $("pw-lead").hidden = !required;
+  $("pw-dialog").showModal();
+}
+
 function setupPasswordDialog() {
   const dialog = $("pw-dialog");
   const form = $("pw-form");
@@ -789,13 +805,7 @@ function setupPasswordDialog() {
     error.textContent = message;
     error.hidden = !message;
   };
-  $("btn-password").addEventListener("click", () => {
-    form.reset();
-    for (const input of fields) input.type = "password";
-    say("");
-    ok.hidden = true;
-    dialog.showModal();
-  });
+  $("btn-password").addEventListener("click", () => openPasswordDialog(false));
   $("pw-close").addEventListener("click", () => dialog.close());
   $("pw-show").addEventListener("change", (e) => {
     for (const input of fields) input.type = e.target.checked ? "text" : "password";
@@ -902,15 +912,15 @@ async function init() {
   renderSetup();
   let user;
   try {
-    ({ user } = await api("/api/auth/me"));
+    const me = await api("/api/auth/me");
+    user = me.user;
+    if (me.limits) state.limits = me.limits;
   } catch (err) {
     showAlert(err.message);
     return;
   }
-  if (user.mustChangePassword) {
-    location.href = "/login";
-    return;
-  }
+  // Midlertidig passord: be om et eget her (en omdirigering til /login kunne gått i ring).
+  if (user.mustChangePassword) openPasswordDialog(true);
   $("hello").textContent = `Hei, ${user.displayName || user.username}!`;
   $("admin-link").hidden = user.role !== "admin";
   const [docsLoaded] = await Promise.all([

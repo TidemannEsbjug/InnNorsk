@@ -138,3 +138,26 @@ test("utfilnavn kolliderer ikke, låsefiler ignoreres", () => {
   assert.ok(core.isIgnoredName(".~lock.Rapport.docx#"));
   assert.ok(!core.isIgnoredName("Rapport.docx"));
 });
+
+test("egen transport (Grok CLI) brukes i stedet for HTTP, med kostnad og nye forsøk", async () => {
+  const { GrokError } = require("../src/grok");
+  let n = 0;
+  const calls = [];
+  const transport = async (input) => {
+    n++;
+    if (n === 1) throw new GrokError("server", "CLI krasjet");
+    const i = input.indexOf("\n\n[");
+    const arr = JSON.parse(input.slice(i + 2, input.lastIndexOf("]") + 1));
+    return { text: "Her er svaret:\n" + JSON.stringify(arr.map(mock.transform)), costUsd: 0.0012, usage: { input_tokens: 10 } };
+  };
+  const out = await translateStrings({ strings: ["Hello", "World"], transport, retryDelayMs: 1, onCall: (c) => calls.push(c) });
+  assert.deepEqual(out, ["NB:HELLO", "NB:WORLD"]);
+  assert.equal(mock.state.calls, 0);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].ok, false);
+  assert.equal(calls[1].costUsd, 0.0012);
+  await assert.rejects(
+    translateStrings({ strings: ["x"], transport: async () => { throw new GrokError("auth", "Ikke logget inn i Grok."); } }),
+    (e) => e.code === "auth"
+  );
+});

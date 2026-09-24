@@ -3,68 +3,67 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#f8f4ed" />
   <title>Logg inn – InnNorsk</title>
+  <link rel="icon" type="image/svg+xml" href="/img/icon.svg" />
   <link rel="icon" type="image/png" href="/img/icon.png" />
+  <link rel="apple-touch-icon" href="/img/icon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,500..650,50&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/app.css" />
   <script type="module" src="/js/login.js"></script>
 </head>
-<body>
-  <div class="blotter login-page">
-    <main class="login-wrap">
-      <div class="brand login-brand">
-        <span class="mark" aria-hidden="true"><span class="mark-tray"></span></span>
-        <span>
-          <span class="eyebrow">Dokumentoversetter</span>
-          <span class="wordmark">InnNorsk</span>
-        </span>
+<body class="page-login">
+  <main class="login">
+    <p class="logo">
+      <img src="/img/icon.svg" alt="" width="48" height="48" />
+      <span>InnNorsk</span>
+    </p>
+
+    <form class="card" id="login-form" novalidate>
+      <h1>Velkommen!</h1>
+      <p class="lead">Logg inn for å oversette dokumentene dine til norsk.</p>
+      <div class="field">
+        <label for="username">Brukernavn</label>
+        <input type="text" id="username" autocomplete="username" autocapitalize="none" spellcheck="false" required />
       </div>
-
-      <form class="sheet" id="login-form" novalidate>
-        <h1>Logg inn</h1>
-        <label class="field">
-          <span>Brukernavn</span>
-          <input type="text" id="username" autocomplete="username" autocapitalize="none" spellcheck="false" required />
-        </label>
-        <label class="field">
-          <span>Passord</span>
+      <div class="field">
+        <label for="password">Passord</label>
+        <div class="pw-wrap">
           <input type="password" id="password" autocomplete="current-password" required />
-        </label>
-        <label class="check">
-          <input type="checkbox" id="show-password" />
-          <span>Vis passordet</span>
-        </label>
-        <p class="form-error" id="login-error" role="alert" hidden></p>
-        <button type="submit" class="paper dark big wide" id="login-submit">Logg inn</button>
-        <p class="small-note">Glemt passordet? Be den som ga deg brukeren om et nytt.</p>
-      </form>
+          <button type="button" class="pw-toggle" data-for="password" aria-pressed="false" aria-label="Vis passordet">Vis</button>
+        </div>
+      </div>
+      <p class="caps" id="caps" role="status" hidden>Caps Lock er på – passordet skiller mellom store og små bokstaver.</p>
+      <p class="form-error" id="login-error" role="alert" hidden></p>
+      <button type="submit" class="btn btn-primary btn-big" id="login-submit">Logg inn</button>
+    </form>
 
-      <form class="sheet" id="change-form" novalidate hidden>
-        <h1>Lag ditt eget passord</h1>
-        <p class="lead" id="change-lead">Du logget inn med et midlertidig passord. Velg et nytt som bare du kjenner.</p>
-        <label class="field" id="current-field" hidden>
-          <span>Passordet du fikk</span>
-          <input type="password" id="current-password" autocomplete="current-password" />
-        </label>
-        <label class="field">
-          <span>Nytt passord (minst 10 tegn)</span>
-          <input type="password" id="new-password" autocomplete="new-password" minlength="10" required />
-        </label>
-        <label class="field">
-          <span>Skriv det nye passordet en gang til</span>
-          <input type="password" id="repeat-password" autocomplete="new-password" minlength="10" required />
-        </label>
-        <label class="check">
-          <input type="checkbox" id="show-new" />
-          <span>Vis passordene</span>
-        </label>
-        <p class="small-note">Tips: Tre-fire vanlige ord etter hverandre er lett å huske og vanskelig å gjette.</p>
-        <p class="form-error" id="change-error" role="alert" hidden></p>
-        <button type="submit" class="paper dark big wide" id="change-submit">Lagre og fortsett</button>
-      </form>
-    </main>
-  </div>
+    <form class="card" id="change-form" novalidate hidden>
+      <h1>Lag ditt eget passord</h1>
+      <p class="lead">Du logget inn med et midlertidig passord. Velg et nytt som bare du kjenner.</p>
+      <div class="field" id="current-field" hidden>
+        <label for="current-password">Passordet du fikk</label>
+        <input type="password" id="current-password" autocomplete="current-password" />
+      </div>
+      <div class="field">
+        <label for="new-password">Nytt passord</label>
+        <div class="pw-wrap">
+          <input type="password" id="new-password" autocomplete="new-password" minlength="8" required aria-describedby="new-help" />
+          <button type="button" class="pw-toggle" data-for="new-password" aria-pressed="false" aria-label="Vis passordet">Vis</button>
+        </div>
+        <p class="field-help" id="new-help">Minst 8 tegn. Tre–fire vanlige ord etter hverandre er lett å huske og vanskelig å gjette.</p>
+      </div>
+      <div class="field">
+        <label for="repeat-password">Skriv det nye passordet en gang til</label>
+        <input type="password" id="repeat-password" autocomplete="new-password" minlength="8" required />
+      </div>
+      <p class="form-error" id="change-error" role="alert" hidden></p>
+      <button type="submit" class="btn btn-primary btn-big" id="change-submit">Lagre og fortsett</button>
+    </form>
+
+    <p class="login-foot">Glemt passordet? Spør den som ga deg tilgang, så får du et nytt.</p>
+  </main>
 </body>
 </html>

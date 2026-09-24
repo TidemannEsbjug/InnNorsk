@@ -7,7 +7,6 @@ import { logEvent } from "./log.js";
 import { deleteWork } from "./storage.js";
 
 export const ACTIVE = ["queued", "running"];
-export const FINAL = ["done", "partial", "failed", "cancelled"];
 
 // ---- Estimatorparametre: tilpasset siste vellykkede kall per modell, bufret 60 s ----
 

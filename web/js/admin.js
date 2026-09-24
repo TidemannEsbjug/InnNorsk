@@ -1,19 +1,20 @@
 import {
-  api, h, fill, formatBytes, formatNumber, relativeTime, statusLabel,
-  LANGUAGE_LABELS, logout, reportErrors,
+  api, h, fill, formatBytes, formatNumber, relativeTime, statusLabel, LANGUAGE_LABELS,
+  confirmDialog, logout, reportErrors,
 } from "./api.js";
 
 reportErrors();
 
 const $ = (id) => document.getElementById(id);
+const enc = encodeURIComponent;
 const TABS = ["oversikt", "jobber", "logg", "okter", "brukere"];
-const LEVEL_LABELS = { debug: "Debug", info: "Info", warn: "Advarsel", error: "Feil" };
+const LEVEL_LABELS = { debug: "Feilsøking", info: "Info", warn: "Advarsel", error: "Feil" };
 const EVENT_TYPES = {
-  System: ["system.start", "system.stop", "server.error", "client.error", "retention.sweep", "admin.test_api"],
+  System: ["system.bootstrap", "user.seeded", "server.error", "client.error", "retention.sweep", "admin.test_api"],
   Innlogging: ["auth.login", "auth.login_failed", "auth.locked", "auth.logout", "auth.password_changed", "session.revoked"],
   Brukere: ["user.created", "user.updated", "user.password_reset"],
-  Jobber: ["job.created", "job.queued", "job.started", "job.finished", "job.cancelled", "job.failed"],
-  Filer: ["file.uploaded", "file.rejected", "file.analyzed", "file.analysis_failed", "file.started", "file.done", "file.failed", "file.warning"],
+  Jobber: ["job.created", "job.queued", "job.started", "job.finished", "job.cancelled", "job.failed", "job.deleted"],
+  Filer: ["file.uploaded", "file.rejected", "file.analyzed", "file.analysis_failed", "file.started", "file.done", "file.failed", "file.warning", "file.deleted"],
   Grok: ["grok.retry", "grok.error"],
   Nedlasting: ["download.file", "download.original", "download.zip"],
 };
@@ -81,21 +82,35 @@ function deviceLabel(ua) {
   return os ? `${browser} på ${os}` : browser;
 }
 
+// Serverdata vises alltid som tekst (textContent), så det kan ikke tolkes som HTML.
+function pretty(value) {
+  if (typeof value !== "string") return JSON.stringify(value, null, 2);
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
 // ---------- Små byggeklosser ----------
 
 function badge(status) {
   return h("span", { class: `badge status-${status}` }, statusLabel(status));
 }
 
+function level(value) {
+  return h("span", { class: `lvl lvl-${value}` }, LEVEL_LABELS[value] || value);
+}
+
 function fact(label, ...value) {
   return h("div", null, h("dt", null, label), h("dd", null, ...value));
 }
 
-function card(label, value, tone, sub) {
-  return h("div", { class: `card${tone ? ` ${tone}` : ""}` },
-    h("p", { class: "card-label" }, label),
-    h("p", { class: "card-value" }, value),
-    sub ? h("p", { class: "card-sub" }, sub) : null
+function stat(label, value, sub, bad) {
+  return h("div", { class: `stat${bad ? " is-bad" : ""}` },
+    h("p", { class: "stat-label" }, label),
+    h("p", { class: "stat-value" }, value),
+    sub ? h("p", { class: "stat-sub" }, sub) : null
   );
 }
 
@@ -109,20 +124,12 @@ function table(headers, rows, emptyText) {
 }
 
 function emptyRow(cols, text) {
-  return h("tr", { class: "empty" }, h("td", { colSpan: cols }, text));
+  return h("tr", { class: "empty-row" }, h("td", { colSpan: cols }, text));
 }
 
-function dataDetails(data) {
-  if (data == null || (typeof data === "object" && !Object.keys(data).length)) return null;
-  return h("details", { class: "json" },
-    h("summary", null, "Data"),
-    h("pre", null, JSON.stringify(data, null, 2))
-  );
-}
-
-function errorDetails(message, stack) {
-  if (!stack) return h("span", { class: "err-text" }, message);
-  return h("details", { class: "err" }, h("summary", null, message), h("pre", null, stack));
+function dataDetails(data, label = "Data") {
+  if (data == null || data === "" || (typeof data === "object" && !Object.keys(data).length)) return null;
+  return h("details", { class: "json" }, h("summary", null, label), h("pre", null, pretty(data)));
 }
 
 function tokens(usage) {
@@ -190,27 +197,24 @@ function setupTabs() {
 async function loadOverview() {
   const o = await api("/api/admin/overview");
   $("key-banner").hidden = Boolean(o.apiKeyConfigured);
-  const failed = o.failedFiles24h || 0;
   const t = o.tokens24h || {};
-  $("cards").replaceChildren(
-    card("Brukere", formatNumber(o.users)),
-    card("Aktive økter", formatNumber(o.activeSessions)),
-    card("Jobber siste 24 t", formatNumber(o.jobs24h)),
-    card("Feilede filer siste 24 t", formatNumber(failed), failed ? "bad" : ""),
-    card("API-kall siste 24 t", formatNumber(o.calls24h)),
-    card("Tokens siste 24 t", formatNumber((t.input || 0) + (t.output || 0)), "",
-      `${formatNumber(t.input)} inn · ${formatNumber(t.output)} ut`),
-    card("Modell", o.model || "–", o.apiKeyConfigured ? "" : "bad",
-      o.apiKeyConfigured ? "API-nøkkel er satt" : "API-nøkkel mangler"),
-    card("Lagring", formatBytes(o.storageBytes)),
-    card("Oppetid", formatElapsed(o.uptimeSeconds), "", o.version ? `Versjon ${o.version}` : "")
+  const storage = o.storage || {};
+  fill($("stats"),
+    stat("Brukere", formatNumber(o.users)),
+    stat("Aktive økter", formatNumber(o.activeSessions)),
+    stat("Jobber siste 24 t", formatNumber(o.jobs24h)),
+    stat("Feilede filer siste 24 t", formatNumber(o.failedFiles24h), null, o.failedFiles24h > 0),
+    stat("API-kall siste 24 t", formatNumber(o.calls24h)),
+    stat("Tokens siste 24 t", formatNumber((t.input || 0) + (t.output || 0)), `${formatNumber(t.input)} inn · ${formatNumber(t.output)} ut`),
+    stat("Modell", o.model || "–", o.apiKeyConfigured ? "API-nøkkelen er satt" : "API-nøkkelen mangler", !o.apiKeyConfigured),
+    stat("Lagring", formatBytes(storage.bytes), `${formatNumber(storage.objects)} filer`)
   );
   const est = o.estimator || {};
   const acc = est.accuracy || {};
-  $("estimator").replaceChildren(
+  fill($("estimator"),
     fact("Kilde", est.source === "fitted"
       ? `Tilpasset fra ${formatNumber(est.samples)} API-kall`
-      : `Standardverdier (${formatNumber(est.samples)} vellykkede kall i historikken ennå)`),
+      : `Standardverdier (${formatNumber(est.samples)} vellykkede kall så langt)`),
     fact("Tid per batch", `${decimal(est.a, 1)} s + ${decimal(est.b, 4)} s per tegn`),
     fact("Treffsikkerhet", acc.jobs
       ? `Median avvik ${decimal(acc.medianAbsPctError, 0)} % over ${formatNumber(acc.jobs)} ${acc.jobs === 1 ? "jobb" : "jobber"}`
@@ -219,11 +223,16 @@ async function loadOverview() {
 }
 
 async function testApi() {
-  if (!window.confirm("Dette bruker et lite API-kall. Vil du teste tilkoblingen nå?")) return;
+  const ok = await confirmDialog({
+    title: "Teste API-tilkoblingen?",
+    text: "Dette sender én liten forespørsel til xAI og koster et lite API-kall. Du kan teste én gang i minuttet.",
+    confirm: "Ja, test nå",
+  });
+  if (!ok) return;
   const button = $("btn-test-api");
   const result = $("test-result");
   button.disabled = true;
-  result.className = "result";
+  result.className = "result-line";
   result.textContent = "Tester …";
   try {
     const r = await api("/api/admin/test-api", { method: "POST" });
@@ -243,8 +252,8 @@ async function testApi() {
 
 async function loadJobs() {
   const userId = $("jobs-user").value;
-  const { jobs } = await api(`/api/admin/jobs?limit=50${userId ? `&userId=${encodeURIComponent(userId)}` : ""}`);
-  $("jobs-table").tBodies[0].replaceChildren(...(jobs.length ? jobs.map(jobRow) : [emptyRow(7, "Ingen jobber ennå.")]));
+  const { jobs } = await api(`/api/admin/jobs?limit=50${userId ? `&userId=${enc(userId)}` : ""}`);
+  $("jobs-table").tBodies[0].replaceChildren(...(jobs.length ? jobs.map(jobRow) : [emptyRow(8, "Ingen jobber ennå.")]));
 }
 
 function estimateVsActual(estimate, actual) {
@@ -253,35 +262,37 @@ function estimateVsActual(estimate, actual) {
   const pct = Math.round(((actual - estimate) / estimate) * 100);
   return h("span", null,
     `${formatElapsed(estimate)} / ${formatElapsed(actual)} `,
-    h("span", { class: `delta${Math.abs(pct) > 50 ? " bad" : ""}` }, `${pct > 0 ? "+" : ""}${pct} %`)
+    h("span", { class: `delta${Math.abs(pct) > 50 ? " bad" : ""}` }, `(${pct > 0 ? "+" : ""}${pct} %)`)
   );
 }
 
 function jobRow(job) {
-  const actual = secondsBetween(job.startedAt, job.finishedAt);
   return h("tr", { "data-job": job.id },
-    h("td", { class: "nowrap" }, h("button", { type: "button", class: "link-button", onclick: () => openDrill(job.id) }, formatTs(job.createdAt))),
+    h("td", { class: "nowrap" }, h("button", { type: "button", class: "btn-link", onclick: () => openDrill(job.id) }, formatTs(job.createdAt))),
     h("td", null, job.username || userName(job.userId)),
+    h("td", null, LANGUAGE_LABELS[job.targetLanguage] || job.targetLanguage || "–"),
     h("td", { class: "num" }, formatNumber(job.fileCount)),
-    h("td", null, badge(job.status)),
-    h("td", { class: "nowrap" }, actual != null ? formatElapsed(actual) : job.status === "running" ? "pågår" : "–"),
-    h("td", { class: "nowrap" }, estimateVsActual(job.estimateSeconds, actual)),
+    h("td", null, badge(job.status), job.deleted ? h("span", { class: "deleted" }, "slettet av bruker") : null),
+    h("td", { class: "nowrap" }, estimateVsActual(job.estimateSeconds, secondsBetween(job.startedAt, job.finishedAt))),
+    h("td", { class: "num" }, formatNumber(job.usage && job.usage.calls)),
     h("td", { class: "num nowrap" }, tokens(job.usage))
   );
 }
 
 function fileRow(jobId, f) {
-  const base = `/api/jobs/${encodeURIComponent(jobId)}/files/${encodeURIComponent(f.id)}`;
+  const base = `/api/jobs/${enc(jobId)}/files/${enc(f.id)}`;
   const warnings = (f.warnings || []).map((w) => (typeof w === "string" ? w : w.message || w.code));
-  return h("tr", null,
-    h("td", null, f.path || f.name),
+  return h("tr", { class: f.status === "failed" ? "row-error" : "" },
+    h("td", { class: "msg" }, f.path || f.name),
     h("td", null, badge(f.status)),
     h("td", { class: "num" }, formatNumber(f.chars)),
     h("td", { class: "num" }, formatNumber(f.batches)),
     h("td", { class: "nowrap" }, f.estimateSeconds != null ? formatElapsed(f.estimateSeconds) : "–"),
     h("td", { class: "nowrap" }, f.durationMs != null ? formatElapsed(f.durationMs / 1000) : "–"),
     h("td", { class: "msg" },
-      f.error ? errorDetails(f.error, f.errorStack || f.stack) : f.message || "",
+      f.message || "",
+      f.error && f.error !== f.message ? h("div", { class: "hint mono" }, f.error) : null,
+      dataDetails(f.errorDetails, "Feildetaljer"),
       warnings.length ? h("details", { class: "json" },
         h("summary", null, `${warnings.length} ${warnings.length === 1 ? "advarsel" : "advarsler"}`),
         h("ul", null, warnings.map((w) => h("li", null, w)))) : null
@@ -294,9 +305,9 @@ function fileRow(jobId, f) {
 }
 
 function callRow(names, c) {
-  return h("tr", { class: c.ok ? "" : "lvl-error" },
+  return h("tr", { class: c.ok ? "" : "row-error" },
     h("td", { class: "nowrap" }, formatTs(c.ts)),
-    h("td", null, names.get(c.fileId) || "–"),
+    h("td", { class: "msg" }, names.get(c.fileId) || "–"),
     h("td", { class: "num" }, c.status || "–"),
     h("td", { class: "num" }, c.attempt),
     h("td", { class: "num" }, c.items),
@@ -308,64 +319,63 @@ function callRow(names, c) {
 }
 
 function timelineItem(e) {
-  return h("li", { class: `lvl-${e.level}` },
+  return h("li", { class: `row-${e.level}` },
     h("span", { class: "tl-time" }, formatTs(e.ts)),
-    h("span", { class: `lvl lvl-${e.level}` }, LEVEL_LABELS[e.level] || e.level),
+    level(e.level),
     h("code", null, e.type),
-    h("span", { class: "tl-msg" }, e.message),
+    h("span", null, e.message),
     dataDetails(e.data)
   );
 }
 
 function closeDrill() {
   $("drill").hidden = true;
-  for (const row of $("jobs-table").tBodies[0].rows) row.classList.remove("selected");
+  for (const row of $("jobs-table").tBodies[0].rows) row.classList.remove("is-selected");
 }
 
 async function openDrill(id) {
   const drill = $("drill");
-  for (const row of $("jobs-table").tBodies[0].rows) row.classList.toggle("selected", row.dataset.job === id);
+  for (const row of $("jobs-table").tBodies[0].rows) row.classList.toggle("is-selected", row.dataset.job === id);
   drill.hidden = false;
-  drill.replaceChildren(h("p", null, "Henter jobben …"));
+  fill(drill, h("p", null, "Henter jobben …"));
   drill.scrollIntoView({ behavior: "smooth", block: "start" });
   try {
-    const { job, files = [], events = [], calls = [] } = await api(`/api/admin/jobs/${encodeURIComponent(id)}`);
+    const { job, files = [], events = [], calls = [] } = await api(`/api/admin/jobs/${enc(id)}`);
     const names = new Map(files.map((f) => [f.id, f.path || f.name]));
-    const actual = secondsBetween(job.startedAt, job.finishedAt);
-    const chronological = [...events].sort((a, b) => (a.id || 0) - (b.id || 0));
     const usage = job.usage || {};
     fill(drill,
       h("div", { class: "drill-head" },
-        h("h2", null, "Jobb ", h("code", null, job.id), " ", badge(job.status)),
-        h("button", { type: "button", class: "paper quiet", onclick: closeDrill }, "Lukk")
+        h("h2", null, "Jobb ", h("code", null, job.id), badge(job.status),
+          job.deleted ? h("span", { class: "deleted" }, "slettet av bruker") : null),
+        h("button", { type: "button", class: "btn btn-secondary btn-small", onclick: closeDrill }, "Lukk")
       ),
-      h("dl", { class: "facts cols" },
+      h("dl", { class: "facts" },
         fact("Bruker", job.username || userName(job.userId)),
         fact("Språk", LANGUAGE_LABELS[job.targetLanguage] || job.targetLanguage || "–"),
         fact("Modell", job.model || "–"),
         fact("Opprettet", formatTs(job.createdAt)),
         fact("Startet", formatTs(job.startedAt)),
         fact("Ferdig", formatTs(job.finishedAt)),
-        fact("Estimert / faktisk", estimateVsActual(job.estimateSeconds, actual)),
+        fact("Estimert / faktisk", estimateVsActual(job.estimateSeconds, secondsBetween(job.startedAt, job.finishedAt))),
         fact("Tegn", formatNumber(job.totals && job.totals.chars)),
         fact("API-kall", formatNumber(usage.calls)),
         fact("Tokens inn / ut", tokens(usage))
       ),
       job.error ? h("p", { class: "form-error" }, job.error) : null,
       h("h3", null, `Filer (${files.length})`),
-      table(["Fil", "Status", "Tegn", "Batcher", "Estimert", "Tid", "Melding / feil", "Filer"],
+      table(["Fil", "Status", "Tegn", "Batcher", "Estimert", "Tid", "Melding / feil", "Last ned"],
         files.map((f) => fileRow(job.id, f)), "Ingen filer."),
       h("h3", null, `Grok-kall (${calls.length})`),
-      table(["Tid", "Fil", "HTTP", "Forsøk", "Tekstbiter", "Tegn inn / ut", "Svartid", "Tokens inn / ut / tenk", "Feil"],
+      table(["Tid", "Fil", "HTTP", "Forsøk", "Biter", "Tegn inn / ut", "Svartid", "Tokens inn / ut / tenk", "Feil"],
         calls.map((c) => callRow(names, c)), "Ingen API-kall registrert."),
       h("h3", null, `Hendelser (${events.length})`),
-      chronological.length
-        ? h("ol", { class: "timeline" }, chronological.map(timelineItem))
-        : h("p", { class: "small-note" }, "Ingen hendelser.")
+      events.length
+        ? h("ol", { class: "timeline" }, [...events].sort((a, b) => (a.id || 0) - (b.id || 0)).map(timelineItem))
+        : h("p", { class: "hint" }, "Ingen hendelser.")
     );
     drill.focus({ preventScroll: true });
   } catch (err) {
-    drill.replaceChildren(h("p", { class: "form-error" }, `Noe gikk galt: ${err.message}`));
+    fill(drill, h("p", { class: "form-error" }, `Noe gikk galt: ${err.message}`));
   }
 }
 
@@ -383,14 +393,14 @@ function logUrl(beforeId) {
 }
 
 function logRow(e, fresh) {
-  return h("tr", { class: `lvl-${e.level}${fresh ? " fresh" : ""}` },
+  return h("tr", { class: `row-${e.level}${fresh ? " is-fresh" : ""}` },
     h("td", { class: "nowrap" }, formatTs(e.ts)),
-    h("td", null, h("span", { class: `lvl lvl-${e.level}` }, LEVEL_LABELS[e.level] || e.level)),
+    h("td", null, level(e.level)),
     h("td", null, h("code", null, e.type)),
     h("td", { class: "msg" }, e.message, dataDetails(e.data)),
     h("td", null, e.username || userName(e.userId)),
     h("td", null, e.jobId ? h("button", {
-      type: "button", class: "link-button mono", title: "Åpne jobben", onclick: () => showJob(e.jobId),
+      type: "button", class: "btn-link mono", title: "Åpne jobben", onclick: () => showJob(e.jobId),
     }, e.jobId) : ""),
     h("td", { class: "nowrap" }, e.ip || "")
   );
@@ -468,22 +478,28 @@ function sessionRow(s) {
   const ended = Boolean(s.revokedAt) || new Date(s.expiresAt) < Date.now();
   const device = deviceLabel(s.userAgent);
   return h("tr", { class: ended ? "muted" : "" },
-    h("td", null, h("strong", null, s.username || userName(s.userId))),
-    h("td", { class: "nowrap" }, s.ip || "–"),
+    h("td", null, h("strong", null, s.username || "–"), me && s.username === me.username ? h("span", { class: "tag" }, "deg") : null),
     h("td", { title: s.userAgent || "" }, device),
+    h("td", { class: "nowrap" }, s.ip || "–"),
     h("td", { class: "nowrap", title: formatTs(s.lastSeenAt) }, relativeTime(s.lastSeenAt)),
     h("td", { class: "nowrap" }, formatTs(s.createdAt)),
     h("td", { class: "nowrap" }, s.revokedAt ? `Logget ut ${relativeTime(s.revokedAt)}` : ended ? "Utløpt" : relativeTime(s.expiresAt)),
-    h("td", null, ended ? "" : h("button", {
-      type: "button", class: "paper quiet small", onclick: () => revokeSession(s, device),
-    }, "Logg ut økt"))
+    h("td", { class: "actions" }, ended ? "" : h("button", {
+      type: "button", class: "btn btn-secondary btn-small", onclick: () => revokeSession(s, device),
+    }, "Logg ut"))
   );
 }
 
 async function revokeSession(s, device) {
-  if (!window.confirm(`Logge ut ${s.username || "brukeren"} (${device})?`)) return;
+  const ok = await confirmDialog({
+    title: "Logge ut økten?",
+    text: `${s.username || "Brukeren"} blir logget ut på ${device} og må logge inn på nytt der.`,
+    confirm: "Logg ut økten",
+    danger: true,
+  });
+  if (!ok) return;
   await guarded("okter", async () => {
-    await api(`/api/admin/sessions/${encodeURIComponent(s.idPrefix || s.id)}/revoke`, { method: "POST" });
+    await api(`/api/admin/sessions/${enc(s.idPrefix)}/revoke`, { method: "POST" });
     await loadSessions();
   });
 }
@@ -523,9 +539,9 @@ function userRow(u) {
     h("td", { class: "nowrap" }, u.lastLoginAt ? relativeTime(u.lastLoginAt) : "Aldri"),
     h("td", { class: "nowrap" }, formatTs(u.createdAt)),
     h("td", { class: "actions" },
-      h("button", { type: "button", class: "paper quiet small", onclick: () => resetPassword(u) }, "Nytt passord"),
+      h("button", { type: "button", class: "btn btn-secondary btn-small", onclick: () => resetPassword(u) }, "Nytt passord"),
       self ? null : h("button", {
-        type: "button", class: `paper quiet small${u.disabled ? "" : " danger"}`, onclick: () => toggleDisabled(u),
+        type: "button", class: "btn btn-secondary btn-small", onclick: () => toggleDisabled(u),
       }, u.disabled ? "Aktiver" : "Deaktiver")
     )
   );
@@ -534,24 +550,37 @@ function userRow(u) {
 async function updateUser(u, patch) {
   await guarded("brukere", async () => {
     try {
-      await api(`/api/admin/users/${encodeURIComponent(u.id)}`, { method: "PATCH", body: patch });
+      await api(`/api/admin/users/${enc(u.id)}`, { method: "PATCH", body: patch });
     } finally {
       await loadUsers();
     }
   });
 }
 
-function toggleDisabled(u) {
-  if (!u.disabled && !window.confirm(`Deaktivere ${u.username}? Brukeren kan ikke logge inn før du aktiverer kontoen igjen.`)) return;
+async function toggleDisabled(u) {
+  if (!u.disabled) {
+    const ok = await confirmDialog({
+      title: `Deaktivere ${u.username}?`,
+      text: "Brukeren blir logget ut og kan ikke logge inn før du aktiverer kontoen igjen. Dokumentene blir liggende.",
+      confirm: "Deaktiver",
+      danger: true,
+    });
+    if (!ok) return;
+  }
   updateUser(u, { disabled: !u.disabled });
 }
 
 async function resetPassword(u) {
-  if (!window.confirm(`Lage nytt midlertidig passord for ${u.username}? Det gamle slutter å virke, og brukeren blir logget ut.`)) return;
+  const ok = await confirmDialog({
+    title: `Nytt passord til ${u.username}?`,
+    text: "Det gamle passordet slutter å virke, og brukeren blir logget ut overalt.",
+    confirm: "Lag nytt passord",
+    danger: true,
+  });
+  if (!ok) return;
   await guarded("brukere", async () => {
-    const { password } = await api(`/api/admin/users/${encodeURIComponent(u.id)}/reset-password`, { method: "POST" });
-    showSecret("Nytt passord er laget", u.username, password,
-      "Hei! Her er et nytt midlertidig passord til InnNorsk:");
+    const { password } = await api(`/api/admin/users/${enc(u.id)}/reset-password`, { method: "POST" });
+    showSecret("Nytt passord er laget", u.username, password, "Hei! Her er et nytt midlertidig passord til InnNorsk:");
     await loadUsers();
   });
 }
@@ -587,7 +616,7 @@ function setupUserForm() {
   });
 }
 
-// ---------- Passord-vindu ----------
+// ---------- Passordvindu ----------
 
 function showSecret(title, username, password, greeting) {
   $("secret-title").textContent = title;
@@ -599,7 +628,7 @@ function showSecret(title, username, password, greeting) {
     `Brukernavn: ${username}`,
     `Midlertidig passord: ${password}`,
     "",
-    "Du blir bedt om å lage nytt passord første gang du logger inn.",
+    "Du blir bedt om å lage ditt eget passord første gang du logger inn.",
   ].join("\n");
   $("copy-status").textContent = "";
   $("secret-dialog").showModal();
@@ -657,7 +686,6 @@ async function init() {
     location.replace("/");
     return;
   }
-  $("who").textContent = me.displayName || me.username;
   try {
     await fetchUsers();
   } catch {

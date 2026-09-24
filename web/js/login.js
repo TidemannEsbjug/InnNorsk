@@ -1,21 +1,17 @@
-import { api } from "./api.js";
+import { api, reportErrors } from "./api.js";
+
+reportErrors();
 
 const $ = (id) => document.getElementById(id);
 const loginForm = $("login-form");
 const changeForm = $("change-form");
 
-// Passordet brukeren nettopp logget inn med, så hun slipper å skrive det igjen.
+// Passordet hun nettopp logget inn med, så hun slipper å skrive det igjen.
 let currentPassword = "";
 
-function showError(el, message) {
+function say(el, message) {
   el.textContent = message;
   el.hidden = !message;
-}
-
-function toggleVisible(checkbox, inputs) {
-  checkbox.addEventListener("change", () => {
-    for (const input of inputs) input.type = checkbox.checked ? "text" : "password";
-  });
 }
 
 function showChangeForm() {
@@ -25,16 +21,24 @@ function showChangeForm() {
   (currentPassword ? $("new-password") : $("current-password")).focus();
 }
 
+// Vennligere tekst når serveren ikke svarer som forventet.
+function loginMessage(err) {
+  if (err.status === 401) return `${err.message} Sjekk skrivemåten og prøv igjen.`;
+  if (err.status >= 500) return "Det er et problem hos oss akkurat nå. Prøv igjen om et par minutter.";
+  return err.message;
+}
+
 loginForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const username = $("username").value.trim();
   const password = $("password").value;
   const error = $("login-error");
   if (!username || !password) {
-    showError(error, "Skriv inn både brukernavn og passord.");
+    say(error, !username ? "Skriv inn brukernavnet ditt først." : "Skriv inn passordet ditt også.");
+    (!username ? $("username") : $("password")).focus();
     return;
   }
-  showError(error, "");
+  say(error, "");
   const button = $("login-submit");
   button.disabled = true;
   button.textContent = "Logger inn …";
@@ -45,14 +49,14 @@ loginForm.addEventListener("submit", async (e) => {
       showChangeForm();
     } else {
       location.replace("/");
+      return;
     }
   } catch (err) {
-    showError(error, err.message);
+    say(error, loginMessage(err));
     $("password").select();
-  } finally {
-    button.disabled = false;
-    button.textContent = "Logg inn";
   }
+  button.disabled = false;
+  button.textContent = "Logg inn";
 });
 
 changeForm.addEventListener("submit", async (e) => {
@@ -60,29 +64,36 @@ changeForm.addEventListener("submit", async (e) => {
   const error = $("change-error");
   const current = currentPassword || $("current-password").value;
   const next = $("new-password").value;
-  if (!current) return showError(error, "Skriv inn passordet du fikk.");
-  if (next.length < 10) return showError(error, "Det nye passordet må ha minst 10 tegn.");
-  if (next !== $("repeat-password").value) return showError(error, "De to passordene er ikke like. Prøv igjen.");
-  if (next === current) return showError(error, "Det nye passordet må være forskjellig fra det du fikk.");
-  showError(error, "");
+  if (!current) return say(error, "Skriv inn passordet du fikk.");
+  if (next.length < 8) return say(error, "Det nye passordet må ha minst 8 tegn.");
+  if (next !== $("repeat-password").value) return say(error, "De to passordene er ikke like. Prøv en gang til.");
+  if (next === current) return say(error, "Velg et annet passord enn det du fikk.");
+  say(error, "");
   const button = $("change-submit");
   button.disabled = true;
   try {
     await api("/api/auth/password", { method: "POST", body: { currentPassword: current, newPassword: next } });
     location.replace("/");
   } catch (err) {
-    showError(error, err.message);
+    say(error, err.message);
     button.disabled = false;
   }
 });
 
-toggleVisible($("show-password"), [$("password")]);
-toggleVisible($("show-new"), [$("current-password"), $("new-password"), $("repeat-password")]);
+for (const toggle of document.querySelectorAll(".pw-toggle")) {
+  toggle.addEventListener("click", () => {
+    const input = $(toggle.dataset.for);
+    const show = input.type === "password";
+    input.type = show ? "text" : "password";
+    toggle.textContent = show ? "Skjul" : "Vis";
+    toggle.setAttribute("aria-pressed", String(show));
+    toggle.setAttribute("aria-label", show ? "Skjul passordet" : "Vis passordet");
+  });
+}
 
-// Allerede innlogget? Send videre, eller be om nytt passord først.
-api("/api/auth/me")
-  .then(({ user }) => {
-    if (user.mustChangePassword) showChangeForm();
-    else location.replace("/");
-  })
-  .catch(() => $("username").focus());
+$("password").addEventListener("keyup", (e) => {
+  if (e.getModifierState) $("caps").hidden = !e.getModifierState("CapsLock");
+});
+
+// Serveren sender innloggede brukere rett videre til forsiden.
+$("username").focus();

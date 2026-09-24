@@ -1,3 +1,6 @@
+// Bygger Windows-appen fra macOS/Linux uten Wine: win32-Electron + app.asar med src/, assets/ og prod-avhengigheter.
+// Skyappen (worker/, web/, migrations/, wrangler.jsonc) og test/ blir ikke med.
+//   node scripts/pack-win.js  →  dist/InnNorsk-Windows.zip
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -8,6 +11,33 @@ const asar = require("@electron/asar");
 const root = path.join(__dirname, "..");
 const version = require(path.join(root, "node_modules", "electron", "package.json")).version;
 
+const COPY = ["package-lock.json", "src", "LICENSE"];
+const WORKER_ONLY_DEPS = ["hono"];
+const REQUIRED = ["src/main.js", "src/core.js", "src/validate.js", "src/grok.js", "node_modules/unpdf", "node_modules/jszip"];
+const FORBIDDEN = ["worker", "web", "test", "migrations", "wrangler.jsonc", "node_modules/hono"];
+
+function stageApp(stage) {
+  for (const name of COPY) {
+    execSync(`cp -R ${JSON.stringify(path.join(root, name))} ${JSON.stringify(stage)}`);
+  }
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  for (const dep of WORKER_ONLY_DEPS) delete pkg.dependencies[dep];
+  fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
+  fs.mkdirSync(path.join(stage, "assets"));
+  for (const name of ["icon.png", "icon.ico", "icon.icns"]) {
+    fs.copyFileSync(path.join(root, "assets", name), path.join(stage, "assets", name));
+  }
+
+  // --omit=optional: valgfrie native pakker ville blitt bygget for byggmaskinen, ikke for Windows.
+  execSync("npm install --omit=dev --omit=optional --no-fund --no-audit", { cwd: stage, stdio: "inherit" });
+
+  const missing = REQUIRED.filter((p) => !fs.existsSync(path.join(stage, p)));
+  const extra = FORBIDDEN.filter((p) => fs.existsSync(path.join(stage, p)));
+  if (missing.length || extra.length) {
+    throw new Error(`Feil innhold i appen. Mangler: ${missing.join(", ") || "-"}. Skal ikke være med: ${extra.join(", ") || "-"}.`);
+  }
+}
+
 async function main() {
   const stage = fs.mkdtempSync(path.join(os.tmpdir(), "innnorsk-app-"));
   const dist = path.join(root, "dist");
@@ -15,21 +45,7 @@ async function main() {
   fs.mkdirSync(dist, { recursive: true });
   fs.rmSync(appDir, { recursive: true, force: true });
 
-  // Bare det Electron-appen trenger: ikke server/, web/, test/ eller data/.
-  for (const name of ["package-lock.json", "src", "LICENSE", "README.md"]) {
-    execSync(`cp -R ${JSON.stringify(path.join(root, name))} ${JSON.stringify(stage)}`);
-  }
-  // express brukes bare av skyserveren.
-  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-  delete pkg.dependencies.express;
-  fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
-  fs.mkdirSync(path.join(stage, "assets"));
-  for (const name of ["icon.png", "icon.ico", "icon.icns"]) {
-    fs.copyFileSync(path.join(root, "assets", name), path.join(stage, "assets", name));
-  }
-
-  // --omit=optional: canvas (valgfri for pdfjs-dist) ville blitt bygget for byggmaskinen, ikke Windows.
-  execSync("npm install --omit=dev --omit=optional --no-fund --no-audit", { cwd: stage, stdio: "inherit" });
+  stageApp(stage);
 
   const zipPath = await downloadArtifact({
     version,
