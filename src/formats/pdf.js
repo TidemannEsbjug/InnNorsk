@@ -104,7 +104,11 @@ function linesToParagraphs(lines, pageWidth) {
 
 async function extractPdfLayout(buffer) {
   const pdfjs = require("pdfjs-dist/legacy/build/pdf.js");
-  const data = new Uint8Array(buffer);
+  if (typeof window !== "undefined" && pdfjs.GlobalWorkerOptions && !pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+  const data = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   const loading = pdfjs.getDocument({
     data,
     useSystemFonts: true,

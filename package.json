@@ -9,7 +9,10 @@
   "scripts": {
     "start": "electron .",
     "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site\"",
-    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site\""
+    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site\"",
+    "web:install": "npm --prefix web install",
+    "web:build": "npm --prefix web run build",
+    "web:dev": "npm --prefix web run dev"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -19,6 +22,7 @@
   },
   "devDependencies": {
     "electron": "^35.1.5",
-    "electron-packager": "^17.1.2"
+    "electron-packager": "^17.1.2",
+    "wrangler": "3.112.0"
   }
 }

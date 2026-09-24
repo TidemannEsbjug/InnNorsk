@@ -1,6 +1,12 @@
 node_modules/
 dist/
+web/dist/
+web/node_modules/
 .DS_Store
 *.log
 site/InnNorsk-Windows.zip
 assets/icon.iconset/
+.dev.vars
+.env
+.env.local
+.wrangler/

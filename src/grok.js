@@ -47,6 +47,36 @@ function apiErrorMessage(data, status) {
 }
 
 async function grokRequest({ apiKey, model, input }) {
+  const proxyUrl =
+    (typeof globalThis !== "undefined" && globalThis.__INNNORSK_GROK_PROXY) || "";
+  if (proxyUrl) {
+    const res = await fetch(proxyUrl, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: model || "grok-4.6",
+        input,
+      }),
+    });
+    const raw = await res.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new Error(`Ugyldig svar fra proxy (${res.status}): ${raw.slice(0, 240)}`);
+    }
+    if (res.status === 401) {
+      throw new Error("Du er ikke logget inn. Last siden på nytt og logg inn.");
+    }
+    if (!res.ok) {
+      throw new Error(apiErrorMessage(data, res.status));
+    }
+    const text = String(data.text || "").trim();
+    if (!text) throw new Error("Tomt svar fra Grok.");
+    return text;
+  }
+
   const key = sanitizeKey(apiKey);
   const res = await fetch("https://api.x.ai/v1/responses", {
     method: "POST",

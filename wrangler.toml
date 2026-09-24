@@ -1,0 +1,10 @@
+name = "innnorsk"
+pages_build_output_dir = "web/dist"
+compatibility_date = "2025-10-01"
+
+# Hemmeligheter (ikke i git): AUTH_USERNAME, AUTH_PASSWORD, XAI_API_KEY, SESSION_SECRET
+# Sett lokalt i .dev.vars og i skyen med:
+#   npx wrangler pages secret put AUTH_USERNAME --project-name innnorsk
+#   npx wrangler pages secret put AUTH_PASSWORD --project-name innnorsk
+#   npx wrangler pages secret put XAI_API_KEY --project-name innnorsk
+#   npx wrangler pages secret put SESSION_SECRET --project-name innnorsk

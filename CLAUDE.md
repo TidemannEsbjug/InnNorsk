@@ -77,6 +77,22 @@ Output: `dist/InnNorsk-Windows.zip`. Last opp som GitHub Release. Pages peker p�
 
 Electron-packager `--win` på Mac krever Wine for ikon/metadata. `scripts/pack-win.js` laster ned win32 Electron og pakker `app.asar` i stedet.
 
+## Web-portal (gratis Cloudflare Pages)
+
+`web/` er nettleser-UI. `functions/` er innlogging + xAI-proxy.
+
+- Passord og `XAI_API_KEY` ligger i Cloudflare-secrets / `.dev.vars` (gitignorert), **aldri** i frontend.
+- Klienten parser dokumentene; hver Grok-bit er `POST /api/grok` (kort Worker-kall, gratisplan).
+- Secrets: `AUTH_USERNAME`, `AUTH_PASSWORD`, `XAI_API_KEY`, `SESSION_SECRET`.
+
+```bash
+npm run web:build
+npx wrangler pages dev web/dist --port 8788
+npx wrangler pages deploy web/dist --project-name innnorsk
+```
+
+Brief til Grok Bot: `docs/GROK-BOT.md`.
+
 ## Sky-retning
 
 Eieren vil flytte dette fra lokal `.exe` til en **skyapp** (opplasting i nettleser, oversettelse på server, nedlasting av norsk fil). Behold:

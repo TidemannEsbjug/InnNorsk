@@ -41,6 +41,23 @@ npm start                 # Electron lokalt
 node scripts/pack-win.js  # Windows-zip → dist/InnNorsk-Windows.zip
 ```
 
+### Web-portal (Cloudflare Pages, gratisplan)
+
+Passord og xAI-nøkkel ligger **bare** i Cloudflare-secrets, aldri i siden.
+
+```bash
+cp .dev.vars.example .dev.vars   # fyll inn lokalt, ikke commit
+npm run web:build
+npx wrangler pages dev web/dist --port 8788
+npx wrangler pages deploy web/dist --project-name innnorsk
+npx wrangler pages secret put AUTH_USERNAME --project-name innnorsk
+npx wrangler pages secret put AUTH_PASSWORD --project-name innnorsk
+npx wrangler pages secret put XAI_API_KEY --project-name innnorsk
+npx wrangler pages secret put SESSION_SECRET --project-name innnorsk
+```
+
+Brief du kan gi Grok Bot: [docs/GROK-BOT.md](docs/GROK-BOT.md).
+
 Ikke commit `node_modules/`, `dist/` eller API-nøkler.
 
 ## Lisens
