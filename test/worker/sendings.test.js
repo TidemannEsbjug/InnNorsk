@@ -34,6 +34,9 @@ test("ny sending krever bokmål eller nynorsk og starter som utkast", async () =
   assert.deepEqual(sending.counts, { total: 0, waiting: 0, working: 0, done: 0, failed: 0 });
   const note = await svetlana.post(`/api/sendings/${sending.id}/note`, { note: "Ny melding" });
   assert.equal(note.data.sending.note, "Ny melding");
+  const language = await svetlana.post(`/api/sendings/${sending.id}/note`, { targetLanguage: "bokmal" });
+  assert.deepEqual([language.data.sending.targetLanguage, language.data.sending.note], ["bokmal", "Ny melding"], "bare språket endres");
+  assert.equal((await svetlana.post(`/api/sendings/${sending.id}/note`, { targetLanguage: "svensk" })).status, 400);
 });
 
 test("opplasting lagres i R2 og kommer ut byte for byte likt, med æøå og emoji i navnet; en skadet Word-fil får en vennlig forklaring", async () => {

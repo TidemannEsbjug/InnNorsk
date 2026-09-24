@@ -15,7 +15,7 @@ function price(env, key) {
 
 export function config(env) {
   return {
-    maxFileMb: num(env, "MAX_FILE_MB", 50),
+    maxFileMb: num(env, "MAX_FILE_MB", 25),
     maxFilesPerSending: Math.floor(num(env, "MAX_FILES_PER_SENDING", 50)),
     model: env.XAI_MODEL || "grok-4.6",
     concurrency: Math.floor(num(env, "GROK_CONCURRENCY", 2)),

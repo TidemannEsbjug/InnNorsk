@@ -25,7 +25,7 @@
   "triggers": { "crons": ["*/15 * * * *"] },
   "observability": { "enabled": true },
   "vars": {
-    "MAX_FILE_MB": "50",
+    "MAX_FILE_MB": "25",
     "MAX_FILES_PER_SENDING": "50",
     "XAI_MODEL": "grok-4.6",
     "GROK_CONCURRENCY": "2",

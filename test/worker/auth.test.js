@@ -94,7 +94,7 @@ test("innlogging med riktig bevis gir økt; kapselen er HttpOnly/SameSite=Lax ut
   const me = await client.get("/api/auth/me");
   assert.equal(me.data.user.username, "svetlana");
   assert.equal(me.data.translatorName, "Jonas");
-  assert.deepEqual(me.data.limits, { maxFileMb: 50, maxFilesPerSending: 50 });
+  assert.deepEqual(me.data.limits, { maxFileMb: 25, maxFilesPerSending: 50 });
 });
 
 test("innlogging og utlogging fra iPhone-appen (X-InnNorsk-Client: ios) logges med kilde ios, nettleseren med web", async () => {

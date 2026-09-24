@@ -27,7 +27,6 @@ test.before(async () => {
 });
 
 test.after(async () => {
-  if (process.env.DEV_LOG) fs.writeFileSync(process.env.DEV_LOG, dev.logs() + "\n\nREQUESTS\n" + JSON.stringify(dev.xai.state.requests.map((r) => r.input.slice(-120)), null, 1));
   if (dev) await dev.stop();
   if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -180,8 +179,9 @@ test("sletting midt i oversettelsen stopper Workflowen og rydder R2; cron tar re
   const docx = fs.readFileSync(makeDocx(path.join(tmp, "slett.docx")));
   const sending = await svetlana.send({ "først.txt": "Hello", "slett.docx": docx });
   const fileId = sending.files.find((f) => f.name === "slett.docx").id;
+  // Lang frist: lokalt hender det at runtimen avbryter et steg, og da venter Workflowen før nytt forsøk.
   await eventually(async () => (await dev.sql("SELECT COUNT(*) AS n FROM batches WHERE file_id = ?", fileId))[0].n >= 1,
-    { timeoutMs: 15000, what: "første batch er ferdig" });
+    { timeoutMs: 45000, what: "første batch er ferdig" });
   assert.equal((await svetlana.del(`/api/sendings/${sending.id}`)).status, 204);
   const calls = dev.xai.state.calls;
   assert.deepEqual(await dev.r2Keys(`s/${sending.id}/`), []);

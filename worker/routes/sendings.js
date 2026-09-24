@@ -144,11 +144,14 @@ api.delete("/sendings/:id/files/:fileId", requireUser, async (c) => {
   return c.body(null, 204);
 });
 
+// Melding og/eller språk på utkastet; bare feltene som er med, endres (filene trenger ingen ny analyse).
 api.post("/sendings/:id/note", requireUser, async (c) => {
   const s = await loadSending(c, c.req.param("id"), { write: true });
   if (s.status !== "draft") fail(409, "Denne sendingen er allerede sendt.");
-  const note = str((await readJson(c)).note, MAX_NOTE).trim() || null;
-  await run(c.env, "UPDATE sendings SET note = ? WHERE id = ?", note, s.id);
+  const body = await readJson(c);
+  if (body.targetLanguage !== undefined && !LANGUAGES.includes(body.targetLanguage)) fail(400, "Velg bokmål eller nynorsk.");
+  const note = "note" in body ? str(body.note, MAX_NOTE).trim() || null : s.note;
+  await run(c.env, "UPDATE sendings SET note = ?, target_language = ? WHERE id = ?", note, body.targetLanguage ?? s.target_language, s.id);
   return c.json({ sending: await sendingView(c.env, s.id) });
 });
 
