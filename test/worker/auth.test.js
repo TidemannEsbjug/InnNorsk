@@ -54,6 +54,8 @@ test("sidene krever innlogging og riktig rolle", async () => {
   assert.equal((await anon.get("/")).headers.get("location"), "/login");
   assert.equal((await anon.get("/admin")).headers.get("location"), "/login");
   assert.equal((await anon.get("/login")).status, 200);
+  assert.equal((await anon.get("/admin.html")).headers.get("location"), "/admin", ".html-filene går via de beskyttede rutene");
+  assert.equal((await anon.get("/index.html")).headers.get("location"), "/");
   const svetlana = await dev.login("svetlana");
   assert.equal((await svetlana.get("/login")).headers.get("location"), "/");
   assert.equal((await svetlana.get("/")).status, 200);

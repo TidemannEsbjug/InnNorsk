@@ -60,6 +60,13 @@ body {
 
 h1,
 h2,
+h3,
+.drop-title {
+  text-wrap: balance;
+}
+
+h1,
+h2,
 h3 {
   font-family: var(--font-display);
   font-variation-settings: "SOFT" 100;
@@ -561,7 +568,7 @@ select {
 
 input::placeholder,
 textarea::placeholder {
-  color: #9a7d69;
+  color: #866a57;
 }
 
 input:focus,
@@ -771,6 +778,7 @@ textarea:disabled {
 }
 
 .drop-buttons {
+  justify-self: stretch;
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
@@ -1090,7 +1098,7 @@ textarea:disabled {
 .row {
   display: grid;
   grid-template-columns: auto 1fr auto;
-  align-items: center;
+  align-items: start;
   gap: 8px 14px;
   padding: 12px 0;
 }
@@ -1170,7 +1178,7 @@ textarea:disabled {
   align-items: center;
   gap: 7px;
   padding: 3px 12px 3px 10px;
-  border-radius: 999px;
+  border-radius: 14px;
   font-size: 15px;
   font-weight: 700;
   line-height: 1.4;
@@ -2018,11 +2026,21 @@ pre {
   }
 
   .drop {
-    padding: 24px 14px;
+    padding: 24px 12px;
+  }
+
+  .drop-buttons {
+    gap: 8px;
   }
 
   .drop-buttons .btn {
-    flex: 1 1 130px;
+    flex: 1 1 100px;
+    padding-inline: 12px;
+    white-space: nowrap;
+  }
+
+  .drop-title {
+    font-size: 21px;
   }
 
   .langs {
@@ -2086,7 +2104,20 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .field-inline,
+  .field-inline.grow {
+    flex: 1 1 140px;
+  }
+
   .modal-body {
     padding: 22px 18px;
+  }
+
+  .modal-actions {
+    flex-direction: column-reverse;
+  }
+
+  .modal-actions .btn {
+    width: 100%;
   }
 }

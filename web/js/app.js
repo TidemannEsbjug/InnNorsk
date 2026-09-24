@@ -10,21 +10,19 @@ initMenu();
 // Samme liste som SUPPORTED i src/core.js. Serveren sjekker uansett; dette er for å kunne forklare med én gang.
 const SUPPORTED = new Set([".docx", ".pptx", ".xlsx", ".pdf", ".txt", ".md", ".csv", ".html", ".htm", ".rtf"]);
 const OLD_OFFICE = new Set([".doc", ".ppt", ".xls"]);
-const MAX_FILE_MB = 50; // MAX_FILE_MB i wrangler.jsonc
-const MAX_FILES = 50; // MAX_FILES_PER_SENDING i wrangler.jsonc
 const PERMANENT = new Set([400, 413, 415]); // gjelder bare den ene filen; resten kan sendes
 const ACTIVE = new Set(["sent", "working"]);
 const LANG_KEY = "innnorsk.language";
 const SEEN_KEY = "innnorsk.seenDone";
 
 const SKIP_TEXT = {
-  lock: "Midlertidige filer som Word og Office lager mens et dokument er åpent (navnet starter med ~$). Selve dokumentet er med.",
-  hidden: "Skjulte systemfiler, som .DS_Store og Thumbs.db. Det er ikke dokumenter.",
-  type: "Filtyper som ikke kan oversettes, for eksempel bilder.",
-  empty: "Tomme filer.",
-  big: `Filer som er større enn ${MAX_FILE_MB} MB.`,
-  duplicate: "Filer som allerede ligger i listen.",
-  many: `Mer enn ${MAX_FILES} filer på en gang. Send gjerne resten etterpå.`,
+  lock: () => "Midlertidige filer som Word og Office lager mens et dokument er åpent (navnet starter med ~$). Selve dokumentet er med.",
+  hidden: () => "Skjulte systemfiler, som .DS_Store og Thumbs.db. Det er ikke dokumenter.",
+  type: () => "Filtyper som ikke kan oversettes, for eksempel bilder.",
+  empty: () => "Tomme filer.",
+  big: () => `Filer som er større enn ${state.limits.maxFileMb} MB.`,
+  duplicate: () => "Filer som allerede ligger i listen.",
+  many: () => `Mer enn ${state.limits.maxFilesPerSending} filer på en gang. Send gjerne resten etterpå.`,
 };
 const HARMLESS = new Set(["lock", "hidden", "duplicate", "empty"]);
 
@@ -46,12 +44,17 @@ const state = {
   draft: null, // sendingen på serveren mens filene lastes opp
   sending: false,
   sendings: [],
+  limits: { maxFileMb: 50, maxFilesPerSending: 50 }, // fra /api/auth/me; serveren sjekker uansett
+  fetchedAt: 0, // når listen sist ble hentet (etaSeconds gjelder fra da)
   statuses: new Map(), // fil-ID → status sist vi tegnet, for å merke overganger
   seen: null, // ferdige fil-ID-er hun har sett (localStorage)
   fresh: new Set(), // ferdige siden forrige besøk; fremheves så lenge siden er åpen
   pollTimer: 0,
   failures: 0,
 };
+
+// Brytes bare mellom delene i «Sendt kl. 14:05 · Bokmål · 2 filer», ikke inni dem.
+const nbsp = (text) => text.replace(/ /g, "\u00a0");
 
 function say(el, message) {
   el.textContent = message;
@@ -73,9 +76,9 @@ function skipReason(path, file, known) {
   if (parts.some((p) => p.startsWith(".")) || /^(thumbs\.db|desktop\.ini)$/i.test(name)) return "hidden";
   if (!SUPPORTED.has(extOf(name))) return "type";
   if (file.size === 0) return "empty";
-  if (file.size > MAX_FILE_MB * 1024 * 1024) return "big";
+  if (file.size > state.limits.maxFileMb * 1024 * 1024) return "big";
   if (known.has(path.toLowerCase())) return "duplicate";
-  if (known.size >= MAX_FILES) return "many";
+  if (known.size >= state.limits.maxFilesPerSending) return "many";
   return null;
 }
 
@@ -116,7 +119,7 @@ function renderSkipped(skipped) {
     h("p", null, h("strong", null, harmless
       ? `Vi hoppet over ${plural(total, "fil", "filer")} – det er helt i orden:`
       : `${total === 1 ? "Én fil" : `${total} filer`} ble ikke tatt med:`)),
-    h("ul", null, reasons.map((r) => h("li", null, SKIP_TEXT[r], " ", h("span", { class: "muted" }, `(${names(skipped[r])})`)))),
+    h("ul", null, reasons.map((r) => h("li", null, SKIP_TEXT[r](), " ", h("span", { class: "muted" }, `(${names(skipped[r])})`)))),
     skipped.type ? h("p", null, "Dette kan sendes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekst (.txt, .md, .csv), nettsider (.html) og RTF.") : null,
     oldOffice ? h("p", null, "Har du en eldre Office-fil (.doc, .ppt eller .xls)? Åpne den, velg «Lagre som» og lagre den i det nye formatet (.docx, .pptx eller .xlsx).") : null
   );
@@ -294,9 +297,10 @@ function showCompose() {
 
 // ---------- Mine filer ----------
 
+// etaSeconds er gjenstående tid da listen ble hentet.
 function etaText(progress) {
   if (!progress || progress.etaSeconds == null) return "Beregner hvor lang tid det tar …";
-  const finish = (Date.parse(progress.at) || Date.now()) + progress.etaSeconds * 1000;
+  const finish = state.fetchedAt + progress.etaSeconds * 1000;
   const left = (finish - Date.now()) / 1000;
   if (left < 20) return "Straks ferdig …";
   return `${formatDuration(left)} igjen – ferdig rundt kl. ${formatClock(finish)}`;
@@ -338,7 +342,7 @@ function sendingBlock(s) {
   const when = s.status === "draft" ? "Ikke sendt" : `Sendt kl. ${formatClock(s.sentAt || s.createdAt)}`;
   return h("article", { class: "sending" },
     h("div", { class: "sending-head" },
-      h("p", { class: "sending-meta" }, [when, lang, plural(s.files.length, "fil", "filer")].filter(Boolean).join(" · ")),
+      h("p", { class: "sending-meta" }, [when, lang, plural(s.files.length, "fil", "filer")].filter(Boolean).map(nbsp).join(" · ")),
       h("button", { type: "button", class: "btn-quiet", "data-key": `del-${s.id}`, onclick: () => removeSending(s) }, icon("trash"), "Slett")
     ),
     s.note ? h("p", { class: "my-note" }, h("span", { class: "muted" }, "Din melding: "), `«${s.note}»`) : null,
@@ -430,6 +434,7 @@ async function refresh() {
   clearTimeout(state.pollTimer);
   try {
     const { sendings } = await api("/api/sendings");
+    state.fetchedAt = Date.now();
     state.sendings = sendings || [];
     state.failures = 0;
     $("mine-error").hidden = true;
@@ -522,8 +527,10 @@ $("pw-form").addEventListener("submit", async (e) => {
 
 // ---------- Oppstart og hendelser ----------
 
-function personalize({ user, translatorName }) {
+function personalize({ user, translatorName, limits }) {
   state.me = user;
+  if (limits) Object.assign(state.limits, limits);
+  $("drop-help").textContent = `Word, PowerPoint, Excel, PDF og tekstfiler, opptil ${state.limits.maxFileMb} MB per fil. Du kan også slippe en hel mappe.`;
   const t = translatorName || "oversetteren";
   state.translator = t;
   $("hello").textContent = `Hei, ${user.displayName || user.username}!`;

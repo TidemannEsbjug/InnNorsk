@@ -4,7 +4,7 @@
 const OFFLINE = "Fikk ikke kontakt med serveren. Sjekk internettforbindelsen og prøv igjen.";
 
 // Samme verdi som serveren gir ut for nye passord (PBKDF2-HMAC-SHA256).
-export const ITERATIONS = 310000;
+const ITERATIONS = 310000;
 
 function failure(status, data) {
   const err = new Error((data && data.error) || `Noe gikk galt på serveren (feilkode ${status}). Prøv igjen om litt.`);
@@ -114,15 +114,15 @@ export function passwordProblem(next, repeat, current) {
   return "";
 }
 
-// «Vis»-knapper ved passordfelt (data-for="<input-id>").
-export function bindPasswordToggles(root = document) {
-  for (const toggle of root.querySelectorAll(".pw-toggle")) {
+// «Vis»/«Skjul»-knapper ved passordfelt (data-for="<input-id>").
+export function bindPasswordToggles() {
+  for (const toggle of document.querySelectorAll(".pw-toggle")) {
     toggle.addEventListener("click", () => {
       const input = document.getElementById(toggle.dataset.for);
       const show = input.type === "password";
       input.type = show ? "text" : "password";
       toggle.textContent = show ? "Skjul" : "Vis";
-      toggle.setAttribute("aria-pressed", String(show));
+      toggle.setAttribute("aria-label", show ? "Skjul passordet" : "Vis passordet");
     });
   }
 }
@@ -164,7 +164,6 @@ const ICONS = {
   trash: "M5 7h14M10 7V5h4v2m-7 0l1 12h8l1-12",
   heart: "M12 19s-7-4.5-7-9.5A3.8 3.8 0 0 1 12 7a3.8 3.8 0 0 1 7 2.5c0 5-7 9.5-7 9.5z",
   refresh: "M19 12a7 7 0 1 1-2.1-5M19 4v4h-4",
-  copy: "M9 9h10v10H9zM5 15V5h10",
 };
 
 // Liten strekikon (SVG må lages i eget navnerom, derfor ikke via h()).

@@ -1,6 +1,12 @@
 // InnNorsk Drop — Cloudflare Worker (Free-plan): nettside, API, agent-API for Mac-en, push til iPhone og opprydding.
-// Hemmeligheter settes aldri her: `wrangler secret put AGENT_TOKEN` / `APNS_KEY_P8` / `APNS_KEY_ID` / `APNS_TEAM_ID`
-// (og eventuelt `SALT_PEPPER`). Lokalt: kopier .dev.vars.example til .dev.vars (committes aldri).
+// Første gang:
+//   npx wrangler d1 create innnorsk            → lim inn database_id under
+//   npx wrangler r2 bucket create innnorsk-files
+//   npx wrangler secret put AGENT_TOKEN        (og APNS_KEY_ID, APNS_TEAM_ID, eventuelt SALT_PEPPER)
+//   npx wrangler secret put APNS_KEY_P8 < AuthKey_XXXXXXXXXX.p8
+//   npm run deploy
+//   node scripts/make-user.js <brukernavn> --role admin|user --display-name "Navn" --apply   (én gang per bruker)
+// Hemmeligheter står aldri her. Lokalt: kopier .dev.vars.example til .dev.vars (committes aldri).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "innnorsk",

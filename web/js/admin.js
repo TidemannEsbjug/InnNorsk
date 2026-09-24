@@ -139,10 +139,10 @@ document.addEventListener("visibilitychange", () => {
 // ---------- Oversikt ----------
 
 async function loadOverview() {
-  const [overview, { devices }] = await Promise.all([api("/api/admin/overview"), api("/api/admin/devices")]);
+  const overview = await api("/api/admin/overview");
   renderAgent(overview.agent || {});
   renderStats(overview);
-  renderDevices(devices || []);
+  renderDevices(overview.devices || []);
 }
 
 function renderAgent(agent) {

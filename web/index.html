@@ -55,7 +55,7 @@
             <button type="button" class="btn btn-primary" id="btn-files">Velg filer</button>
             <button type="button" class="btn btn-secondary" id="btn-folder">Velg mappe</button>
           </div>
-          <p class="drop-help">Word, PowerPoint, Excel, PDF og tekstfiler, opptil 50 MB per fil. Du kan også slippe en hel mappe.</p>
+          <p class="drop-help" id="drop-help">Word, PowerPoint, Excel, PDF og tekstfiler, opptil 50 MB per fil. Du kan også slippe en hel mappe.</p>
         </div>
         <input type="file" id="input-files" class="visually-hidden" tabindex="-1" aria-hidden="true" multiple
                accept=".docx,.pptx,.xlsx,.pdf,.txt,.md,.csv,.html,.htm,.rtf" />
@@ -85,7 +85,7 @@
 
           <p class="form-error" id="send-error" role="alert" hidden></p>
           <p class="send-summary" id="summary" aria-live="polite"></p>
-          <button type="button" class="btn btn-primary btn-big btn-send" id="btn-send" disabled>Send</button>
+          <button type="button" class="btn btn-primary btn-big" id="btn-send" disabled>Send</button>
         </div>
       </div>
 

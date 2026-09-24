@@ -126,15 +126,17 @@ admin.post("/files/:fileId/status", async (c) => {
   const body = await readJson(c);
   const message = str(body.message, 1000).trim() || null;
   const now = nowIso();
-  const updates = {
-    sent: ["status = 'sent', lease_until = NULL, started_at = NULL, finished_at = NULL, progress_at = NULL", []],
-    failed: ["status = 'failed', lease_until = NULL, finished_at = ?", [now]],
-    done: ["status = 'done', lease_until = NULL, finished_at = COALESCE(finished_at, ?)", [now]],
+  // «sent» = sett i kø igjen for Mac-en; message er en valgfri tekst Svetlana ser (brukes for «failed»).
+  const change = {
+    sent: ["status = 'sent', started_at = NULL, finished_at = NULL, progress_at = NULL", []],
+    failed: ["status = 'failed', finished_at = ?", [now]],
+    done: ["status = 'done', finished_at = COALESCE(finished_at, ?)", [now]],
   }[body.status];
-  if (!updates) fail(400, "Ugyldig status.");
-  if (body.status === "done" && !f.output_name) fail(409, "Filen har ingen oversettelse ennå. Last opp en først.");
+  if (!change) fail(400, "Ugyldig status.");
   if (f.status === "draft") fail(409, "Filen er ikke sendt ennå.");
-  await run(env, `UPDATE files SET ${updates[0]}, message = ? WHERE id = ?`, ...updates[1], message, f.id);
+  if (body.status === "done" && !f.output_name) fail(409, "Filen har ingen oversettelse ennå. Last opp en først.");
+  const [assignments, args] = change;
+  await run(env, `UPDATE files SET ${assignments}, lease_until = NULL, message = ? WHERE id = ?`, ...args, message, f.id);
   const ctx = reqCtx(c, { sendingId: f.sending_id, fileId: f.id });
   await logEvent(env, "info", "file.status_changed", `${f.name}: ${f.status} → ${body.status}`, { from: f.status, to: body.status, message }, ctx);
   await finishIfDone(env, f.sending_id, ctx);
