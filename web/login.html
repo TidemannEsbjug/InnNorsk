@@ -3,27 +3,24 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#f8f4ed" />
+  <meta name="theme-color" content="#f9f1e4" />
   <title>Logg inn – InnNorsk</title>
   <link rel="icon" type="image/svg+xml" href="/img/icon.svg" />
-  <link rel="icon" type="image/png" href="/img/icon.png" />
   <link rel="apple-touch-icon" href="/img/icon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,500..650,50&family=Onest:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,500..700,100&family=Nunito+Sans:opsz,wght@6..12,400..800&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/app.css" />
   <script type="module" src="/js/login.js"></script>
 </head>
 <body class="page-login">
   <main class="login">
-    <p class="logo">
-      <img src="/img/icon.svg" alt="" width="48" height="48" />
-      <span>InnNorsk</span>
-    </p>
+    <p class="brand"><img src="/img/icon.svg" alt="" width="36" height="36" /> InnNorsk</p>
 
-    <form class="card" id="login-form" novalidate>
-      <h1>Velkommen!</h1>
-      <p class="lead">Logg inn for å oversette dokumentene dine til norsk.</p>
+    <form class="card login-card rise" id="login-form" novalidate>
+      <img class="login-art" src="/img/brev.svg" alt="" width="240" height="180" />
+      <h1>Velkommen</h1>
+      <p class="lead">Her sender du dokumenter som skal oversettes til norsk.</p>
       <div class="field">
         <label for="username">Brukernavn</label>
         <input type="text" id="username" autocomplete="username" autocapitalize="none" spellcheck="false" required />
@@ -40,13 +37,9 @@
       <button type="submit" class="btn btn-primary btn-big" id="login-submit">Logg inn</button>
     </form>
 
-    <form class="card" id="change-form" novalidate hidden>
-      <h1>Lag ditt eget passord</h1>
+    <form class="card login-card rise" id="change-form" novalidate hidden>
+      <h1 id="change-title" tabindex="-1">Lag ditt eget passord</h1>
       <p class="lead">Du logget inn med et midlertidig passord. Velg et nytt som bare du kjenner.</p>
-      <div class="field" id="current-field" hidden>
-        <label for="current-password">Passordet du fikk</label>
-        <input type="password" id="current-password" autocomplete="current-password" />
-      </div>
       <div class="field">
         <label for="new-password">Nytt passord</label>
         <div class="pw-wrap">
@@ -63,7 +56,7 @@
       <button type="submit" class="btn btn-primary btn-big" id="change-submit">Lagre og fortsett</button>
     </form>
 
-    <p class="login-foot">Glemt passordet? Spør den som ga deg tilgang, så får du et nytt.</p>
+    <p class="login-foot">Glemt passordet? Si fra til den som ga deg tilgang, så får du et nytt.</p>
   </main>
 </body>
 </html>

@@ -1,6 +1,6 @@
-// InnNorsk Sky — Cloudflare Worker (sider + API), D1, R2 og Workflows.
-// Hemmeligheter settes aldri her: `wrangler secret put XAI_API_KEY` / `ADMIN_PASSWORD` / `SEED_USER_PASSWORD`.
-// Lokalt: kopier .dev.vars.example til .dev.vars (committes aldri).
+// InnNorsk Drop — Cloudflare Worker (Free-plan): nettside, API, agent-API for Mac-en, push til iPhone og opprydding.
+// Hemmeligheter settes aldri her: `wrangler secret put AGENT_TOKEN` / `APNS_KEY_P8` / `APNS_KEY_ID` / `APNS_TEAM_ID`
+// (og eventuelt `SALT_PEPPER`). Lokalt: kopier .dev.vars.example til .dev.vars (committes aldri).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "innnorsk",
@@ -8,23 +8,17 @@
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "assets": { "directory": "./web", "binding": "ASSETS", "run_worker_first": true },
-  // Databasen finnes ved navn (`wrangler d1 create innnorsk`). database_id kan legges til, men trengs ikke.
-  "d1_databases": [{ "binding": "DB", "database_name": "innnorsk", "migrations_dir": "migrations" }],
+  "d1_databases": [
+    { "binding": "DB", "database_name": "innnorsk", "database_id": "<SETT INN ETTER wrangler d1 create>", "migrations_dir": "migrations" }
+  ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "innnorsk-files" }],
-  "workflows": [{ "name": "innnorsk-job", "binding": "JOB", "class_name": "TranslationJob" }],
-  "triggers": { "crons": ["17 3 * * *"] },
-  "limits": { "cpu_ms": 300000 },
+  "triggers": { "crons": ["*/15 * * * *"] },
   "observability": { "enabled": true },
   "vars": {
-    "XAI_MODEL": "grok-4.6",
-    "GROK_CONCURRENCY": "2",
-    "RETENTION_DAYS": "0",
-    "SESSION_DAYS": "30",
-    "MAX_FILE_MB": "30",
-    "MAX_FILES_PER_JOB": "100",
-    "EVENT_RETENTION_DAYS": "180",
-    "ADMIN_USERNAME": "admin",
-    "SEED_USER_USERNAME": "Svetlana",
-    "SEED_USER_DISPLAY_NAME": "Svetlana"
+    "MAX_FILE_MB": "50",
+    "MAX_FILES_PER_SENDING": "50",
+    "APNS_BUNDLE_ID": "no.innnorsk.varsel",
+    "APNS_ENV": "sandbox",
+    "AGENT_OFFLINE_ALERT_MINUTES": "120"
   }
 }

@@ -1,39 +1,52 @@
-// Innlogging, utlogging, «hvem er jeg» og bytte av passord.
+// Salt, innlogging, utlogging, «hvem er jeg» og bytte av passord.
 import { Hono } from "hono";
 import { config } from "../config.js";
 import { one, run, nowIso } from "../db.js";
 import { logEvent } from "../log.js";
-import { fail, readJson, reqCtx, clientIp, str } from "../http.js";
+import { fail, readJson, reqCtx, clientIp } from "../http.js";
 import {
-  MIN_PASSWORD, createSession, clearSessionCookie, findUserByName, publicUser, requireUser, verifyPassword,
-  dummyVerify, hashPassword, recentFailures, isThrottled, reachesThrottle, recordFailure, clearUserFailures,
-  revokeUserSessions,
+  ITERATIONS, createSession, clearSessionCookie, findUserByName, publicUser, requireSession, fakeSalt, isProof,
+  newSecret, safeEqual, sha256hex, normalizeUsername, recentFailures, isThrottled, reachesThrottle, recordFailure,
+  clearUserFailures, revokeUserSessions,
 } from "../auth.js";
 
 const TOO_MANY = "For mange mislykkede forsøk. Vent 15 minutter og prøv igjen.";
 const WRONG = "Brukernavnet eller passordet stemmer ikke.";
+// Ukjent bruker sammenlignes mot denne, så svaret tar like lang tid.
+const NO_USER = "0".repeat(64);
+
+async function translatorName(env) {
+  const row = await one(env, "SELECT display_name, username FROM users WHERE role = 'admin' ORDER BY id LIMIT 1");
+  return row ? row.display_name || row.username : "oversetteren";
+}
 
 const auth = new Hono();
+
+auth.post("/salt", async (c) => {
+  const username = normalizeUsername((await readJson(c)).username);
+  if (!username) fail(400, "Skriv inn brukernavnet ditt.");
+  const user = await findUserByName(c.env, username);
+  return c.json(user ? { salt: user.salt, iterations: user.iterations } : { salt: fakeSalt(c.env, username), iterations: ITERATIONS });
+});
 
 auth.post("/login", async (c) => {
   const env = c.env;
   const body = await readJson(c);
-  const username = str(body.username, 100).trim();
-  const password = str(body.password, 500);
+  const username = normalizeUsername(body.username);
   const ip = clientIp(c);
   const ctx = reqCtx(c);
-  if (!username || !password) fail(400, "Skriv inn brukernavn og passord.");
+  if (!username || !isProof(body.proof)) fail(400, "Skriv inn brukernavn og passord.");
 
   const failures = await recentFailures(env, ip, username);
   if (isThrottled(failures)) fail(429, TOO_MANY);
 
   const user = await findUserByName(env, username);
-  const ok = user ? verifyPassword(password, user.password_hash) : (dummyVerify(password), false);
-  if (!ok) {
+  if (!safeEqual(sha256hex(body.proof), user ? user.verifier : NO_USER) || !user) {
     await recordFailure(env, ip, username);
-    await logEvent(env, "warn", "auth.login_failed", "Mislykket innlogging", { username, knownUser: Boolean(user) }, { ...ctx, userId: user ? user.id : null });
+    const logCtx = { ...ctx, userId: user ? user.id : null };
+    await logEvent(env, "warn", "auth.login_failed", "Mislykket innlogging", { username, knownUser: Boolean(user) }, logCtx);
     if (reachesThrottle(failures)) {
-      await logEvent(env, "warn", "auth.locked", "Innlogging sperret i 15 minutter etter for mange forsøk", { username }, { ...ctx, userId: user ? user.id : null });
+      await logEvent(env, "warn", "auth.locked", "Innlogging sperret i 15 minutter etter for mange forsøk", { username }, logCtx);
     }
     fail(401, WRONG);
   }
@@ -43,8 +56,10 @@ auth.post("/login", async (c) => {
   }
   await clearUserFailures(env, username);
   await run(env, "UPDATE users SET last_login_at = ? WHERE id = ?", nowIso(), user.id);
-  const session = await createSession(c, user);
-  await logEvent(env, "info", "auth.login", `${user.username} logget inn`, { userAgent: (c.req.header("User-Agent") || "").slice(0, 200) }, { ...ctx, userId: user.id, sessionId: session.id });
+  const session = await createSession(c, user, ip);
+  await logEvent(env, "info", "auth.login", `${user.username} logget inn`, {
+    userAgent: (c.req.header("User-Agent") || "").slice(0, 200),
+  }, { ...ctx, userId: user.id, sessionId: session.id });
   return c.json({ user: publicUser(user) });
 });
 
@@ -59,28 +74,30 @@ auth.post("/logout", async (c) => {
 });
 
 // limits lar nettsiden si fra om for store filer før de lastes opp.
-auth.get("/me", requireUser, (c) => {
-  const { maxFileMb, maxFilesPerJob } = config(c.env);
-  return c.json({ user: c.get("user"), limits: { maxFileMb, maxFilesPerJob } });
+auth.get("/me", requireSession, async (c) => {
+  const { maxFileMb, maxFilesPerSending } = config(c.env);
+  return c.json({ user: c.get("user"), translatorName: await translatorName(c.env), limits: { maxFileMb, maxFilesPerSending } });
 });
 
-auth.post("/password", requireUser, async (c) => {
+auth.post("/password", requireSession, async (c) => {
   const env = c.env;
   const body = await readJson(c);
-  const current = str(body.currentPassword, 500);
-  const next = str(body.newPassword, 500);
   const me = c.get("user");
   const ip = clientIp(c);
   const failures = await recentFailures(env, ip, me.username);
   if (isThrottled(failures)) fail(429, TOO_MANY);
-  const user = await one(env, "SELECT * FROM users WHERE id = ?", me.id);
-  if (!verifyPassword(current, user.password_hash)) {
+  const user = await one(env, "SELECT verifier FROM users WHERE id = ?", me.id);
+  if (!isProof(body.currentProof) || !safeEqual(sha256hex(body.currentProof), user.verifier)) {
     await recordFailure(env, ip, me.username);
+    await logEvent(env, "warn", "auth.password_change_failed", "Feil nåværende passord ved passordbytte", null, reqCtx(c));
     fail(400, "Det nåværende passordet stemmer ikke.");
   }
-  if ([...next].length < MIN_PASSWORD) fail(400, `Det nye passordet må ha minst ${MIN_PASSWORD} tegn.`);
-  if (next === current) fail(400, "Det nye passordet må være forskjellig fra det gamle.");
-  await run(env, "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", hashPassword(next), me.id);
+  const secret = newSecret(body);
+  await run(
+    env,
+    "UPDATE users SET salt = ?, iterations = ?, verifier = ?, must_change_password = 0 WHERE id = ?",
+    secret.salt, secret.iterations, secret.verifier, me.id
+  );
   await revokeUserSessions(env, me.id, "password_changed", c.get("session").id);
   await logEvent(env, "info", "auth.password_changed", `${me.username} byttet passord`, null, reqCtx(c));
   return c.body(null, 204);

@@ -1,73 +1,50 @@
-// Innlogging, økter, brems, CSRF, sider og sikkerhetshoder mot ekte wrangler dev.
+// Innlogging med klientberegnet PBKDF2-bevis, økter, brems, CSRF, sider, sikkerhetshoder og make-user.js mot ekte wrangler dev.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
-const fs = require("node:fs");
+const path = require("node:path");
+const { execFile } = require("node:child_process");
 const workerDev = require("../helpers/worker-dev");
-const { Client, loggedIn } = require("./client");
+const { Client, proofFor, newSecret } = require("./client");
 
-const { DEFAULT_VARS: V } = workerDev;
 const WRONG = "Brukernavnet eller passordet stemmer ikke.";
+const TOO_MANY = "For mange mislykkede forsøk. Vent 15 minutter og prøv igjen.";
 const CSP =
   "default-src 'self'; img-src 'self' data:; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 
 let dev;
 let admin;
+let ipCounter = 0;
+const freshIp = () => `10.9.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`;
+const countEvents = async (type) => (await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = ?", type))[0].n;
 
 test.before(async () => {
   dev = await workerDev.start();
-  admin = await loggedIn(dev.url, "admin", V.ADMIN_PASSWORD);
+  admin = await dev.login("eier");
 });
 
 test.after(async () => {
   if (dev) await dev.stop();
 });
 
-async function createUser(username, password) {
-  const res = await admin.post("/api/admin/users", { username, displayName: username, role: "user", password });
+async function createUser(username, password, extra = {}) {
+  const res = await admin.post("/api/admin/users", { username, displayName: username, role: "user", ...newSecret(password), mustChangePassword: false, ...extra });
   assert.equal(res.status, 201, JSON.stringify(res.data));
   return res.data.user;
 }
 
-const countEvents = async (type) => (await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = ?", type))[0].n;
-
-test("første forespørsel oppretter admin og Svetlana, og Svetlana slipper å bytte passord", async () => {
-  for (const name of ["Svetlana", "svetlana", "SVETLANA"]) {
-    const res = await new Client(dev.url).login(name, V.SEED_USER_PASSWORD);
-    assert.equal(res.status, 200, name);
-    assert.deepEqual(res.data.user, {
-      id: res.data.user.id,
-      username: "Svetlana",
-      displayName: "Svetlana",
-      role: "user",
-      mustChangePassword: false,
-    });
-  }
-  const me = await admin.get("/api/auth/me");
-  assert.equal(me.data.user.role, "admin");
-  assert.equal(me.data.user.mustChangePassword, false);
-  assert.deepEqual(me.data.limits, { maxFileMb: 30, maxFilesPerJob: 100 });
-  assert.deepEqual(
-    (await dev.sql("SELECT username, role FROM users ORDER BY id")).map((u) => `${u.username}:${u.role}`),
-    ["admin:admin", "Svetlana:user"]
-  );
-  assert.equal(await countEvents("user.seeded"), 1);
-  assert.equal(await countEvents("system.bootstrap"), 1);
-});
-
 test("sikkerhetshoder finnes på alle svar, også statiske filer og feil", async () => {
   const anon = new Client(dev.url);
-  for (const path of ["/healthz", "/login", "/css/app.css", "/api/auth/me", "/api/finnes-ikke", "/finnes-ikke.png", "/"]) {
-    const res = await anon.get(path);
-    assert.equal(res.headers.get("content-security-policy"), CSP, path);
-    assert.equal(res.headers.get("x-content-type-options"), "nosniff", path);
-    assert.equal(res.headers.get("x-frame-options"), "DENY", path);
-    assert.equal(res.headers.get("referrer-policy"), "same-origin", path);
-    assert.equal(res.headers.get("strict-transport-security"), null, `${path}: ingen HSTS over http`);
+  for (const p of ["/healthz", "/login", "/api/auth/me", "/api/finnes-ikke", "/finnes-ikke.png", "/"]) {
+    const res = await anon.get(p);
+    assert.equal(res.headers.get("content-security-policy"), CSP, p);
+    assert.equal(res.headers.get("x-content-type-options"), "nosniff", p);
+    assert.equal(res.headers.get("x-frame-options"), "DENY", p);
+    assert.equal(res.headers.get("referrer-policy"), "same-origin", p);
+    assert.equal(res.headers.get("strict-transport-security"), null, `${p}: ingen HSTS over http`);
   }
-  const health = await anon.get("/healthz");
-  assert.deepEqual(health.data, { ok: true });
-  const missing = await anon.get("/api/finnes-ikke");
+  assert.deepEqual((await anon.get("/healthz")).data, { ok: true });
+  const missing = await admin.get("/api/finnes-ikke");
   assert.equal(missing.status, 404);
   assert.equal(missing.headers.get("cache-control"), "no-store");
 });
@@ -76,172 +53,187 @@ test("sidene krever innlogging og riktig rolle", async () => {
   const anon = new Client(dev.url);
   assert.equal((await anon.get("/")).headers.get("location"), "/login");
   assert.equal((await anon.get("/admin")).headers.get("location"), "/login");
-  const login = await anon.get("/login");
-  assert.equal(login.status, 200);
-  assert.match(login.data.toString(), /<html/i);
-  assert.ok([301, 302, 307, 308].includes((await anon.get("/index.html")).status), "index.html går via beskyttet /");
-
-  const svetlana = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
+  assert.equal((await anon.get("/login")).status, 200);
+  const svetlana = await dev.login("svetlana");
   assert.equal((await svetlana.get("/login")).headers.get("location"), "/");
   assert.equal((await svetlana.get("/")).status, 200);
   assert.equal((await svetlana.get("/admin")).headers.get("location"), "/");
   assert.equal((await admin.get("/admin")).status, 200);
+  assert.equal((await admin.get("/")).status, 200, "admin kan også bruke sendesiden");
 });
 
-test("innloggingskapselen er HttpOnly og SameSite=Lax, uten Secure over http", async () => {
-  const res = await new Client(dev.url).login("Svetlana", V.SEED_USER_PASSWORD);
+test("salt: ekte for kjente brukere, stabilt falskt for ukjente – umulig å skille", async () => {
+  const anon = new Client(dev.url);
+  const salt = async (username) => (await anon.post("/api/auth/salt", { username })).data;
+  const [row] = await dev.sql("SELECT salt, iterations FROM users WHERE username = 'svetlana'");
+  assert.deepEqual(await salt("svetlana"), { salt: row.salt, iterations: 310000 });
+  assert.deepEqual(await salt(" SVETLANA "), { salt: row.salt, iterations: 310000 });
+  const fake = await salt("finnes-ikke");
+  assert.deepEqual(await salt("Finnes-Ikke"), fake, "stabilt");
+  assert.notEqual((await salt("finnes-heller-ikke")).salt, fake.salt);
+  assert.equal(fake.iterations, 310000);
+  assert.equal(fake.salt.length, row.salt.length);
+  assert.match(fake.salt, /^[A-Za-z0-9_-]+$/);
+  assert.equal((await anon.post("/api/auth/salt", {})).status, 400);
+});
+
+test("innlogging med riktig bevis gir økt; kapselen er HttpOnly/SameSite=Lax uten Secure over http", async () => {
+  const client = new Client(dev.url, { ip: freshIp() });
+  const res = await client.login("SVETLANA", dev.users.svetlana.password);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.data.user, { id: res.data.user.id, username: "svetlana", displayName: "Svetlana", role: "user", mustChangePassword: false });
   assert.match(res.setCookie, /^innnorsk_sid=[A-Za-z0-9_-]{43};/);
-  assert.match(res.setCookie, /HttpOnly/);
-  assert.match(res.setCookie, /SameSite=Lax/);
-  assert.match(res.setCookie, /Path=\//);
-  assert.match(res.setCookie, /Max-Age=2592000/);
+  for (const attr of [/HttpOnly/, /SameSite=Lax/, /Path=\//, /Max-Age=2592000/]) assert.match(res.setCookie, attr);
   assert.doesNotMatch(res.setCookie, /Secure/);
+  const token = client.cookie.split("=")[1];
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM sessions WHERE id = ?", hash))[0].n, 1, "D1 har bare sha256 av tokenet");
+  const me = await client.get("/api/auth/me");
+  assert.equal(me.data.user.username, "svetlana");
+  assert.equal(me.data.translatorName, "Jonas");
+  assert.deepEqual(me.data.limits, { maxFileMb: 50, maxFilesPerSending: 50 });
 });
 
 test("feil passord og ukjent bruker gir samme norske melding", async () => {
-  const anon = new Client(dev.url, { ip: "10.0.0.1" });
-  const wrong = await anon.login("Svetlana", "feil-passord-000");
+  const anon = new Client(dev.url, { ip: freshIp() });
+  const wrong = await anon.login("svetlana", "feil-passord-000");
   const unknown = await anon.login("finnes-ikke", "feil-passord-000");
-  assert.equal(wrong.status, 401);
-  assert.equal(unknown.status, 401);
-  assert.equal(wrong.data.error, WRONG);
-  assert.equal(unknown.data.error, WRONG);
-  assert.equal((await anon.post("/api/auth/login", { username: "" })).status, 400);
-  assert.equal((await anon.req("POST", "/api/auth/login", { body: "{ikke json", headers: { "Content-Type": "application/json" } })).status, 400);
+  assert.deepEqual([wrong.status, wrong.data.error], [401, WRONG]);
+  assert.deepEqual([unknown.status, unknown.data.error], [401, WRONG]);
+  assert.equal((await anon.post("/api/auth/login", { username: "svetlana", proof: "kort" })).status, 400);
+  assert.equal((await anon.post("/api/auth/login", { username: "", proof: "x".repeat(43) })).status, 400);
+  const bad = await anon.req("POST", "/api/auth/login", { body: "{ikke json", headers: { "Content-Type": "application/json" } });
+  assert.equal(bad.status, 400);
 });
 
-test("CSRF: endringer uten X-InnNorsk-hodet avvises", async () => {
-  const svetlana = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
-  const blocked = await svetlana.req("POST", "/api/jobs", { json: { targetLanguage: "bokmal" }, csrf: false });
-  assert.equal(blocked.status, 403);
-  assert.match(blocked.data.error, /avvist/);
-  const login = await new Client(dev.url).req("POST", "/api/auth/login", {
-    json: { username: "Svetlana", password: V.SEED_USER_PASSWORD },
-    csrf: false,
-  });
-  assert.equal(login.status, 403);
-  assert.equal((await svetlana.get("/api/auth/me")).status, 200, "GET trenger ikke hodet");
-});
-
-test("fem feil på 15 minutter sperrer brukernavnet og IP-en", async () => {
+test("fem feil på 15 minutter sperrer brukernavnet og IP-en (429)", async () => {
   await createUser("Bremse", "riktig-passord-1");
   const attacker = new Client(dev.url, { ip: "10.0.0.66" });
-  for (let i = 0; i < 5; i++) {
-    const res = await attacker.login("bremse", `feil-${i}-passord`);
-    assert.equal(res.status, 401, `forsøk ${i + 1}`);
-  }
+  for (let i = 0; i < 5; i++) assert.equal((await attacker.login("bremse", `feil-${i}-passord`)).status, 401, `forsøk ${i + 1}`);
   const locked = await attacker.login("Bremse", "riktig-passord-1");
-  assert.equal(locked.status, 429);
-  assert.equal(locked.data.error, "For mange mislykkede forsøk. Vent 15 minutter og prøv igjen.");
-  // Samme brukernavn fra en annen IP er også sperret, andre brukere fra samme IP likeså.
-  assert.equal((await new Client(dev.url, { ip: "10.0.0.67" }).login("Bremse", "riktig-passord-1")).status, 429);
-  assert.equal((await attacker.login("Svetlana", V.SEED_USER_PASSWORD)).status, 429);
-  // Svetlana fra sin egen IP er ikke berørt.
-  assert.equal((await new Client(dev.url, { ip: "10.0.0.68" }).login("Svetlana", V.SEED_USER_PASSWORD)).status, 200);
+  assert.deepEqual([locked.status, locked.data.error], [429, TOO_MANY]);
+  assert.equal((await new Client(dev.url, { ip: "10.0.0.67" }).login("Bremse", "riktig-passord-1")).status, 429, "samme bruker, ny IP");
+  assert.equal((await attacker.login("svetlana", dev.users.svetlana.password)).status, 429, "samme IP, annen bruker");
+  assert.equal((await new Client(dev.url, { ip: "10.0.0.68" }).login("svetlana", dev.users.svetlana.password)).status, 200);
   assert.equal(await countEvents("auth.locked"), 1);
   assert.ok((await countEvents("auth.login_failed")) >= 5);
 });
 
+test("deaktivert konto: riktig passord gir 403, åpne økter stoppes", async () => {
+  const user = await createUser("Deaktiv", "deaktiv-passord-1");
+  const client = await dev.login("Deaktiv", { password: "deaktiv-passord-1", ip: freshIp() });
+  assert.equal((await admin.patch(`/api/admin/users/${user.id}`, { disabled: true })).status, 200);
+  assert.equal((await client.get("/api/auth/me")).status, 401);
+  const res = await new Client(dev.url, { ip: freshIp() }).login("Deaktiv", "deaktiv-passord-1");
+  assert.deepEqual([res.status, res.data.error], [403, "Kontoen er deaktivert."]);
+  assert.equal((await new Client(dev.url, { ip: freshIp() }).login("Deaktiv", "feil-passord-1")).status, 401);
+  assert.equal((await admin.patch(`/api/admin/users/${user.id}`, { disabled: false })).status, 200);
+  assert.equal((await new Client(dev.url, { ip: freshIp() }).login("Deaktiv", "deaktiv-passord-1")).status, 200);
+});
+
 test("utlogging avslutter økten og sletter kapselen", async () => {
-  const client = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
+  const client = await dev.login("svetlana", { ip: freshIp() });
   const cookie = client.cookie;
   const out = await client.post("/api/auth/logout");
   assert.equal(out.status, 204);
   assert.match(out.setCookie, /Max-Age=0/);
-  assert.equal(client.cookie, null);
   const reused = new Client(dev.url);
   reused.cookie = cookie;
   assert.equal((await reused.get("/api/auth/me")).status, 401);
   assert.ok((await countEvents("auth.logout")) >= 1);
 });
 
+test("CSRF: endringer uten X-InnNorsk-hodet avvises med 403", async () => {
+  const svetlana = await dev.login("svetlana", { ip: freshIp() });
+  const blocked = await svetlana.req("POST", "/api/sendings", { json: { targetLanguage: "bokmal" }, csrf: false });
+  assert.equal(blocked.status, 403);
+  assert.match(blocked.data.error, /avvist/);
+  assert.equal((await svetlana.req("POST", "/api/auth/logout", { csrf: false })).status, 403);
+  assert.equal((await new Client(dev.url).req("POST", "/api/auth/salt", { json: { username: "x" }, csrf: false })).status, 403);
+  assert.equal((await svetlana.get("/api/auth/me")).status, 200, "GET trenger ikke hodet");
+});
+
 test("passordbytte krever riktig nåværende passord og logger ut andre økter", async () => {
   await createUser("Passbytte", "gammelt-passord-1");
-  const a = await loggedIn(dev.url, "Passbytte", "gammelt-passord-1", { ip: "10.1.0.1" });
-  const b = await loggedIn(dev.url, "Passbytte", "gammelt-passord-1", { ip: "10.1.0.2" });
-  const short = await a.post("/api/auth/password", { currentPassword: "gammelt-passord-1", newPassword: "kort" });
-  assert.equal(short.status, 400);
-  assert.equal(short.data.error, "Det nye passordet må ha minst 8 tegn.");
-  const wrong = await a.post("/api/auth/password", { currentPassword: "feil-feil-feil", newPassword: "nytt-passord-2" });
-  assert.equal(wrong.status, 400);
-  assert.equal((await a.post("/api/auth/password", { currentPassword: "gammelt-passord-1", newPassword: "nytt-passord-2" })).status, 204);
+  const a = await dev.login("Passbytte", { password: "gammelt-passord-1", ip: freshIp() });
+  const b = await dev.login("Passbytte", { password: "gammelt-passord-1", ip: freshIp() });
+  const { data: current } = await a.post("/api/auth/salt", { username: "Passbytte" });
+  const currentProof = proofFor("gammelt-passord-1", current.salt, current.iterations);
+  const wrong = await a.post("/api/auth/password", { currentProof: proofFor("feil-feil-feil", current.salt, current.iterations), ...newSecret("nytt-passord-2") });
+  assert.deepEqual([wrong.status, wrong.data.error], [400, "Det nåværende passordet stemmer ikke."]);
+  const weak = await a.post("/api/auth/password", { currentProof, ...newSecret("nytt-passord-2"), iterations: 1000 });
+  assert.equal(weak.status, 400, "for få iterasjoner");
+  assert.equal((await a.post("/api/auth/password", { currentProof, ...newSecret("nytt-passord-2") })).status, 204);
   assert.equal((await a.get("/api/auth/me")).status, 200, "økten som byttet, fortsetter");
   assert.equal((await b.get("/api/auth/me")).status, 401, "andre økter logges ut");
-  assert.equal((await new Client(dev.url, { ip: "10.1.0.3" }).login("Passbytte", "gammelt-passord-1")).status, 401);
-  assert.equal((await new Client(dev.url, { ip: "10.1.0.3" }).login("passbytte", "nytt-passord-2")).status, 200);
+  assert.equal((await new Client(dev.url, { ip: freshIp() }).login("Passbytte", "gammelt-passord-1")).status, 401);
+  assert.equal((await new Client(dev.url, { ip: freshIp() }).login("passbytte", "nytt-passord-2")).status, 200);
   assert.equal(await countEvents("auth.password_changed"), 1);
 });
 
-test("deaktivert konto kan ikke logge inn, og åpne økter stoppes", async () => {
-  const user = await createUser("Deaktiv", "deaktiv-passord-1");
-  const client = await loggedIn(dev.url, "Deaktiv", "deaktiv-passord-1", { ip: "10.2.0.1" });
-  assert.equal((await admin.patch(`/api/admin/users/${user.id}`, { disabled: true })).status, 200);
-  assert.equal((await client.get("/api/auth/me")).status, 401);
-  const res = await new Client(dev.url, { ip: "10.2.0.2" }).login("Deaktiv", "deaktiv-passord-1");
-  assert.equal(res.status, 403);
-  assert.equal(res.data.error, "Kontoen er deaktivert.");
-  assert.equal((await admin.patch(`/api/admin/users/${user.id}`, { disabled: false })).status, 200);
-  assert.equal((await new Client(dev.url, { ip: "10.2.0.3" }).login("Deaktiv", "deaktiv-passord-1")).status, 200);
+test("må bytte passord: alt annet enn auth er stengt til passordet er byttet", async () => {
+  await createUser("Nyansatt", "midlertidig-pass-1", { mustChangePassword: true });
+  const client = new Client(dev.url, { ip: freshIp() });
+  const login = await client.login("Nyansatt", "midlertidig-pass-1");
+  assert.equal(login.data.user.mustChangePassword, true);
+  assert.equal((await client.get("/api/auth/me")).data.user.mustChangePassword, true);
+  const blocked = await client.get("/api/sendings");
+  assert.equal(blocked.status, 403);
+  assert.equal(blocked.data.mustChangePassword, true);
+  const { data: current } = await client.post("/api/auth/salt", { username: "Nyansatt" });
+  const currentProof = proofFor("midlertidig-pass-1", current.salt, current.iterations);
+  assert.equal((await client.post("/api/auth/password", { currentProof, ...newSecret("mitt-eget-pass-2") })).status, 204);
+  assert.equal((await client.get("/api/auth/me")).data.user.mustChangePassword, false);
+  assert.equal((await client.get("/api/sendings")).status, 200);
 });
 
-test("admin kan avslutte en bestemt økt", async () => {
-  const keep = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
-  const victim = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
-  const token = victim.cookie.split("=")[1];
-  const idPrefix = crypto.createHash("sha256").update(token).digest("hex").slice(0, 8);
-  const list = await admin.get("/api/admin/sessions");
-  const row = list.data.sessions.find((s) => s.idPrefix === idPrefix);
-  assert.ok(row, "økten vises i listen");
-  assert.equal(row.username, "Svetlana");
-  assert.equal(row.active, true);
-  assert.equal("id" in row, false, "full økt-id sendes aldri ut");
-  assert.equal((await admin.post(`/api/admin/sessions/${idPrefix}/revoke`)).status, 204);
-  assert.equal((await victim.get("/api/auth/me")).status, 401);
-  assert.equal((await keep.get("/api/auth/me")).status, 200);
-  assert.equal((await admin.post(`/api/admin/sessions/${idPrefix}/revoke`)).status, 404, "allerede avsluttet");
-  const all = await admin.get("/api/admin/sessions?all=1");
-  assert.ok(all.data.sessions.find((s) => s.idPrefix === idPrefix && s.revokedAt && s.revokedReason === "admin"));
-  assert.ok((await countEvents("session.revoked")) >= 1);
-});
-
-test("tilgangskontroll: anonym får 401, vanlig bruker 403 på admin-API", async () => {
+test("tilgang: anonym får 401, vanlig bruker 403 på admin-API", async () => {
   const anon = new Client(dev.url);
-  for (const path of ["/api/auth/me", "/api/jobs", "/api/documents", "/api/admin/overview"]) {
-    const res = await anon.get(path);
-    assert.equal(res.status, 401, path);
-    assert.equal(res.data.error, "Du må logge inn.");
+  for (const p of ["/api/auth/me", "/api/sendings", "/api/admin/overview"]) {
+    const res = await anon.get(p);
+    assert.deepEqual([res.status, res.data.error], [401, "Du må logge inn."], p);
   }
-  const svetlana = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
-  for (const path of ["/api/admin/overview", "/api/admin/events", "/api/admin/users", "/api/admin/sessions", "/api/admin/jobs"]) {
-    assert.equal((await svetlana.get(path)).status, 403, path);
+  const svetlana = await dev.login("svetlana", { ip: freshIp() });
+  for (const p of ["/api/admin/overview", "/api/admin/events", "/api/admin/users", "/api/admin/sessions", "/api/admin/sendings", "/api/admin/devices"]) {
+    assert.equal((await svetlana.get(p)).status, 403, p);
   }
   assert.equal((await svetlana.post("/api/admin/users", { username: "x" })).status, 403);
+  assert.equal((await svetlana.post("/api/admin/test-push")).status, 403);
 });
 
-test("Svetlana opprettes aldri på nytt, selv etter omstart med nytt passord i miljøet", async () => {
-  const dir = dev.persistDir;
-  await dev.stop({ keepData: true });
-  dev = null;
-  const restarted = await workerDev.start({
-    persistDir: dir,
-    vars: { SEED_USER_PASSWORD: "et-annet-testpassord-456", XAI_API_KEY: "" },
-  });
-  try {
-    assert.equal((await new Client(restarted.url).login("Svetlana", V.SEED_USER_PASSWORD)).status, 200);
-    assert.equal((await new Client(restarted.url).login("Svetlana", "et-annet-testpassord-456")).status, 401);
-    assert.equal((await restarted.sql("SELECT COUNT(*) AS n FROM events WHERE type = 'user.seeded'"))[0].n, 1);
+test("klientlogg: nettleser- og iPhone-feil havner i loggen, maks 30 i minuttet per økt", async () => {
+  const svetlana = await dev.login("svetlana", { ip: freshIp() });
+  assert.equal((await svetlana.post("/api/client-log", { level: "error", message: "TypeError: x", stack: "at app.js:1", url: "/" })).status, 204);
+  assert.equal((await svetlana.post("/api/client-log", { message: "Krasj i appen" }, { headers: { "X-InnNorsk-Client": "ios" } })).status, 204);
+  const rows = await dev.sql("SELECT source, message, user_id FROM events WHERE type = 'client.error' ORDER BY id DESC LIMIT 2");
+  assert.deepEqual(rows.map((r) => [r.source, r.message]), [["ios", "Krasj i appen"], ["web", "TypeError: x"]]);
+  for (let i = 0; i < 28; i++) await svetlana.post("/api/client-log", { message: `feil ${i}` });
+  assert.equal((await svetlana.post("/api/client-log", { message: "en for mye" })).status, 429);
+  assert.equal((await new Client(dev.url).post("/api/client-log", { message: "anonym" })).status, 401);
+});
 
-    // Uten API-nøkkel: admin ser det, og oversettelser kan ikke startes.
-    const boss = await loggedIn(restarted.url, "admin", V.ADMIN_PASSWORD);
-    assert.equal((await boss.get("/api/admin/overview")).data.apiKeyConfigured, false);
-    const svetlana = await loggedIn(restarted.url, "Svetlana", V.SEED_USER_PASSWORD);
-    const job = await svetlana.newJob();
-    assert.equal((await svetlana.upload(job.id, "hei.txt", "Hello there\n")).status, 201);
-    const start = await svetlana.post(`/api/jobs/${job.id}/start`);
-    assert.equal(start.status, 503);
-    assert.equal(start.data.error, "Tjenesten mangler API-nøkkel. Kontakt administrator.");
-  } finally {
-    await restarted.stop();
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+test("make-user.js: CLI-en lager brukeren i D1, innlogging virker, og ny kjøring bytter passord og logger ut", async () => {
+  const run = (password) => new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, [
+      path.join(__dirname, "../../scripts/make-user.js"), "Olga", "--role", "user", "--display-name", "Olga Å.",
+      "--local", "--persist-to", dev.persistDir, "--apply",
+    ], { cwd: path.join(__dirname, "../.."), env: { ...process.env, CI: "1", WRANGLER_SEND_METRICS: "false" } }, (err, stdout, stderr) => {
+      if (err) reject(new Error(`${err.message}\n${stdout}\n${stderr}`));
+      else resolve(stdout + stderr);
+    });
+    child.stdin.end(`${password}\n${password}\n`);
+  });
+  const out = await run("olgas-passord-1");
+  assert.match(out, /npx wrangler d1 execute innnorsk --local --persist-to \S+ --command 'INSERT INTO users/);
+  assert.doesNotMatch(out, /olgas-passord-1/, "passordet skrives aldri ut");
+  const olga = new Client(dev.url, { ip: freshIp() });
+  const res = await olga.login("olga", "olgas-passord-1");
+  assert.equal(res.status, 200, JSON.stringify(res.data));
+  assert.equal(res.data.user.displayName, "Olga Å.");
+
+  await run("olgas-nye-passord-2");
+  assert.equal((await olga.get("/api/auth/me")).status, 401, "gamle økter er avsluttet");
+  assert.equal((await new Client(dev.url, { ip: freshIp() }).login("olga", "olgas-passord-1")).status, 401);
+  assert.equal((await new Client(dev.url, { ip: freshIp() }).login("olga", "olgas-nye-passord-2")).status, 200);
+  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM users WHERE username = 'Olga'"))[0].n, 1);
 });

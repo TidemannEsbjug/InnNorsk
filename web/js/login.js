@@ -1,24 +1,25 @@
-import { api, reportErrors } from "./api.js";
+import { api, proofFor, changePassword, passwordProblem, bindPasswordToggles, reportErrors } from "./api.js";
 
 reportErrors();
+bindPasswordToggles();
 
 const $ = (id) => document.getElementById(id);
 const loginForm = $("login-form");
 const changeForm = $("change-form");
 
-// Passordet hun nettopp logget inn med, så hun slipper å skrive det igjen.
-let currentPassword = "";
+// Etter innlogging med midlertidig passord: brukes som «nåværende passord» ved byttet.
+let session = null;
 
 function say(el, message) {
   el.textContent = message;
   el.hidden = !message;
 }
 
-function showChangeForm() {
-  loginForm.hidden = true;
-  changeForm.hidden = false;
-  $("current-field").hidden = Boolean(currentPassword);
-  (currentPassword ? $("new-password") : $("current-password")).focus();
+function busy(button, text) {
+  button.dataset.label ||= button.textContent;
+  button.disabled = Boolean(text);
+  button.classList.toggle("is-busy", Boolean(text));
+  button.textContent = text || button.dataset.label;
 }
 
 // Vennligere tekst når serveren ikke svarer som forventet.
@@ -34,66 +35,51 @@ loginForm.addEventListener("submit", async (e) => {
   const password = $("password").value;
   const error = $("login-error");
   if (!username || !password) {
-    say(error, !username ? "Skriv inn brukernavnet ditt først." : "Skriv inn passordet ditt også.");
-    (!username ? $("username") : $("password")).focus();
+    say(error, username ? "Skriv inn passordet ditt også." : "Skriv inn brukernavnet ditt først.");
+    $(username ? "password" : "username").focus();
     return;
   }
   say(error, "");
   const button = $("login-submit");
-  button.disabled = true;
-  button.textContent = "Logger inn …";
+  busy(button, "Logger inn …");
   try {
-    const { user } = await api("/api/auth/login", { method: "POST", body: { username, password } });
-    if (user.mustChangePassword) {
-      currentPassword = password;
-      showChangeForm();
-    } else {
+    const proof = await proofFor(username, password);
+    const { user } = await api("/api/auth/login", { method: "POST", body: { username, proof } });
+    if (!user.mustChangePassword) {
       location.replace("/");
       return;
     }
+    session = { username: user.username, password, proof };
+    loginForm.hidden = true;
+    changeForm.hidden = false;
+    $("change-title").focus();
   } catch (err) {
     say(error, loginMessage(err));
     $("password").select();
   }
-  button.disabled = false;
-  button.textContent = "Logg inn";
+  busy(button, "");
 });
 
 changeForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const error = $("change-error");
-  const current = currentPassword || $("current-password").value;
   const next = $("new-password").value;
-  if (!current) return say(error, "Skriv inn passordet du fikk.");
-  if (next.length < 8) return say(error, "Det nye passordet må ha minst 8 tegn.");
-  if (next !== $("repeat-password").value) return say(error, "De to passordene er ikke like. Prøv en gang til.");
-  if (next === current) return say(error, "Velg et annet passord enn det du fikk.");
-  say(error, "");
+  const problem = passwordProblem(next, $("repeat-password").value, session.password);
+  say(error, problem);
+  if (problem) return;
   const button = $("change-submit");
-  button.disabled = true;
+  busy(button, "Lagrer …");
   try {
-    await api("/api/auth/password", { method: "POST", body: { currentPassword: current, newPassword: next } });
+    await changePassword({ username: session.username, currentProof: session.proof, next });
     location.replace("/");
   } catch (err) {
     say(error, err.message);
-    button.disabled = false;
+    busy(button, "");
   }
 });
 
-for (const toggle of document.querySelectorAll(".pw-toggle")) {
-  toggle.addEventListener("click", () => {
-    const input = $(toggle.dataset.for);
-    const show = input.type === "password";
-    input.type = show ? "text" : "password";
-    toggle.textContent = show ? "Skjul" : "Vis";
-    toggle.setAttribute("aria-pressed", String(show));
-    toggle.setAttribute("aria-label", show ? "Skjul passordet" : "Vis passordet");
-  });
-}
-
 $("password").addEventListener("keyup", (e) => {
-  if (e.getModifierState) $("caps").hidden = !e.getModifierState("CapsLock");
+  $("caps").hidden = !e.getModifierState("CapsLock");
 });
 
-// Serveren sender innloggede brukere rett videre til forsiden.
 $("username").focus();

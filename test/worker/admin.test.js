@@ -1,197 +1,204 @@
-// Admin-API og klientlogg mot wrangler dev + falsk xAI.
+// Eierens admin-API mot ekte wrangler dev: oversikt, sendinger, manuell opplasting, status, svar, logg, økter, brukere og enheter.
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const crypto = require("node:crypto");
 const workerDev = require("../helpers/worker-dev");
-const mockServer = require("../helpers/mock-xai-server");
-const { Client, loggedIn } = require("./client");
+const { Client, newSecret } = require("./client");
 
-const { DEFAULT_VARS: V } = workerDev;
-
+const PHONE = "d4".repeat(32);
 let dev;
-let mock;
-let admin;
 let svetlana;
-let job;
+let admin;
+let agent;
 
 test.before(async () => {
-  mock = await mockServer.start({ mode: "upper" });
-  dev = await workerDev.start({ mockUrl: mock.url });
-  admin = await loggedIn(dev.url, "admin", V.ADMIN_PASSWORD);
-  svetlana = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
-  job = await svetlana.translate({
-    "ok.txt": "Hello admin\n\nSecond part\n",
-    "feil.txt": `Breaks ${mockServer.FAIL_MARKER}\n`,
-  });
+  dev = await workerDev.start();
+  [svetlana, admin] = [await dev.login("svetlana"), await dev.login("eier")];
+  agent = dev.agent();
 });
 
 test.after(async () => {
   if (dev) await dev.stop();
-  if (mock) await mock.close();
 });
 
-test("oversikten viser nøkkelstatus, bruk, lagring og estimator", async () => {
-  const { status, data } = await admin.get("/api/admin/overview");
-  assert.equal(status, 200);
-  assert.equal(data.apiKeyConfigured, true);
-  assert.equal(data.model, "grok-4.6");
+test("enheter: registrer (upsert), list, test-push, slå av ved BadDeviceToken og slett", async () => {
+  const none = await admin.post("/api/admin/test-push");
+  assert.deepEqual(none.data, { sent: 0, failed: 0, errors: ["Ingen iPhone er registrert ennå. Åpne InnNorsk-appen og logg inn."] });
+  assert.equal((await admin.post("/api/admin/devices", { token: "ikke-hex", env: "sandbox" })).status, 400);
+  assert.equal((await admin.post("/api/admin/devices", { token: PHONE, env: "test" })).status, 400);
+  const first = await admin.post("/api/admin/devices", { token: PHONE.toUpperCase(), env: "sandbox", name: "Gammelt navn" });
+  assert.equal(first.status, 200);
+  const again = await admin.post("/api/admin/devices", { token: PHONE, env: "production", name: "Jonas sin iPhone" }, { headers: { "X-InnNorsk-Client": "ios" } });
+  assert.deepEqual({ token: again.data.device.token, env: again.data.device.env, name: again.data.device.name, username: again.data.device.username },
+    { token: PHONE, env: "production", name: "Jonas sin iPhone", username: "eier" });
+  const list = (await admin.get("/api/admin/devices")).data.devices;
+  assert.equal(list.length, 1);
+  assert.equal((await dev.sql("SELECT source FROM events WHERE type = 'device.registered' ORDER BY id DESC LIMIT 1"))[0].source, "ios");
+
+  dev.apns.reset();
+  const ok = await admin.post("/api/admin/test-push");
+  assert.deepEqual(ok.data, { sent: 1, failed: 0, errors: [] });
+  const [push] = dev.apns.pushes;
+  assert.equal(push.jwtValid, true);
+  assert.deepEqual(push.payload.aps.alert, { title: "Testvarsel fra InnNorsk", body: "Varslene virker. Du får beskjed når det kommer nye filer." });
+  assert.ok((await dev.sql("SELECT last_ok_at FROM devices"))[0].last_ok_at);
+
+  const bad = "e5".repeat(32);
+  await admin.post("/api/admin/devices", { token: bad, env: "sandbox", name: "Ødelagt" });
+  dev.apns.failToken(bad, 400);
+  const mixed = await admin.post("/api/admin/test-push");
+  assert.deepEqual(mixed.data, { sent: 1, failed: 1, errors: ["Ødelagt: BadDeviceToken"] });
+  const broken = (await admin.get("/api/admin/devices")).data.devices.find((d) => d.token === bad);
+  assert.ok(broken.disabledAt);
+  assert.equal(broken.lastError, "BadDeviceToken");
+  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = 'push.failed'"))[0].n, 1);
+
+  assert.equal((await admin.del(`/api/admin/devices/${bad}`)).status, 204);
+  assert.equal((await admin.del(`/api/admin/devices/${bad}`)).status, 404);
+  assert.deepEqual((await admin.get("/api/admin/devices")).data.devices.map((d) => d.token), [PHONE]);
+});
+
+test("oversikt: agent, tellere, lagring, enheter og brukere", async () => {
+  await agent.post("/api/agent/poll", { host: "mac-mini", version: "2.0.0", state: "idle", grokOk: true });
+  const sending = await svetlana.send({ "a.txt": "Hello", "b.txt": "Hello!" });
+  await agent.post(`/api/agent/files/${sending.files[0].id}/claim`);
+  const { data } = await admin.get("/api/admin/overview");
+  assert.deepEqual(data.agent, { online: true, lastSeenAt: data.agent.lastSeenAt, host: "mac-mini", version: "2.0.0", state: "idle", stateMessage: null, grokOk: true });
+  assert.deepEqual(data.counts, { waiting: 1, working: 1, doneToday: 0, failed: 0 });
+  assert.deepEqual(data.storage, { files: 2, bytes: 11 });
+  assert.deepEqual(data.devices.map((d) => d.token), [PHONE]);
   assert.equal(data.users, 2);
-  assert.ok(data.activeSessions >= 2);
-  assert.equal(data.jobs24h, 1);
-  assert.equal(data.failedFiles24h, 1);
-  assert.equal(data.calls24h, mock.state.calls);
-  assert.ok(data.tokens24h.input > 0 && data.tokens24h.output > 0);
-  assert.deepEqual(data.storage.objects, 3, "original + utfil for ok.txt, original for feil.txt");
-  assert.ok(data.storage.bytes > 0);
-  assert.deepEqual(Object.keys(data.estimator).sort(), ["a", "accuracy", "b", "samples", "source"]);
-  assert.equal(data.estimator.source, "default");
-  assert.deepEqual(Object.keys(data.estimator.accuracy).sort(), ["jobs", "medianAbsPctError"]);
-  assert.equal("XAI_API_KEY" in data, false);
 });
 
-test("loggen kan filtreres og blas bakover", async () => {
-  const all = (await admin.get("/api/admin/events?limit=500")).data.events;
-  assert.ok(all.length > 10);
-  assert.ok(all.every((e, i) => i === 0 || all[i - 1].id > e.id), "nyeste først");
-
-  const logins = (await admin.get("/api/admin/events?type=auth.login")).data.events;
-  assert.ok(logins.length >= 2 && logins.every((e) => e.type === "auth.login"));
-  assert.ok(logins.some((e) => e.username === "Svetlana"));
-  const prefixed = (await admin.get("/api/admin/events?type=file.")).data.events;
-  assert.ok(prefixed.length && prefixed.every((e) => e.type.startsWith("file.")));
-  const warnings = (await admin.get("/api/admin/events?level=error")).data.events;
-  assert.ok(warnings.length && warnings.every((e) => e.level === "error"));
-  const forJob = (await admin.get(`/api/admin/events?jobId=${job.job.id}`)).data.events;
-  assert.ok(forJob.length && forJob.every((e) => e.jobId === job.job.id));
-  const forUser = (await admin.get(`/api/admin/events?userId=${job.job.userId}`)).data.events;
-  assert.ok(forUser.length && forUser.every((e) => e.userId === job.job.userId));
-  const search = (await admin.get(`/api/admin/events?q=${encodeURIComponent("ok.txt er oversatt")}`)).data.events;
-  assert.equal(search.length, 1);
-  assert.equal(search[0].type, "file.done");
-  assert.equal(typeof search[0].data, "object");
-  assert.equal((await admin.get("/api/admin/events?q=100%25_")).data.events.length, 0, "% og _ er vanlige tegn");
-
-  const page1 = (await admin.get("/api/admin/events?limit=3")).data.events;
-  const page2 = (await admin.get(`/api/admin/events?limit=3&beforeId=${page1[2].id}`)).data.events;
-  assert.equal(page1.length, 3);
-  assert.equal(page2.length, 3);
-  assert.ok(page2[0].id < page1[2].id);
+test("sendinger for admin viser brukernavn og tekniske detaljer", async () => {
+  const { data } = await admin.get("/api/admin/sendings?limit=10");
+  const s = data.sendings[0];
+  assert.equal(s.username, "svetlana");
+  assert.equal(s.displayName, "Svetlana");
+  assert.deepEqual(Object.keys(s.files[0]).filter((k) => ["error", "errorDetails", "attempts", "costUsd", "outputSource", "leaseUntil"].includes(k)).sort(),
+    ["attempts", "costUsd", "error", "errorDetails", "leaseUntil", "outputSource"]);
+  assert.equal(typeof data.agentOnline, "boolean");
 });
 
-test("brukere: opprett med engangspassord, endre, nullstill og vern mot å låse seg selv ute", async () => {
-  const list = (await admin.get("/api/admin/users")).data.users;
-  assert.deepEqual(list.map((u) => [u.username, u.role]), [["admin", "admin"], ["Svetlana", "user"]]);
-  assert.ok(list.every((u) => !("password_hash" in u) && !("passwordHash" in u)));
-
-  const created = await admin.post("/api/admin/users", { username: "Øyvind", displayName: "Øyvind Ås", role: "user" });
-  assert.equal(created.status, 201);
-  const { user, password } = created.data;
-  assert.match(password, /^[A-Za-z2-9]{14}$/);
-  assert.equal(user.mustChangePassword, true);
-  assert.equal(user.displayName, "Øyvind Ås");
-  const oyvind = await loggedIn(dev.url, "øYVIND", password);
-  assert.equal((await oyvind.get("/api/auth/me")).data.user.mustChangePassword, true);
-
-  assert.equal((await admin.post("/api/admin/users", { username: "øyvind" })).status, 409);
-  assert.equal((await admin.post("/api/admin/users", { username: "SVETLANA" })).status, 409);
-  assert.equal((await admin.post("/api/admin/users", { username: "med mellomrom" })).status, 400);
-  assert.equal((await admin.post("/api/admin/users", { username: "kort", password: "1234567" })).status, 400);
-  assert.equal((await admin.post("/api/admin/users", { username: "rolle", role: "sjef" })).status, 400);
-  const own = await admin.post("/api/admin/users", { username: "Egenvalgt", password: "valgt-passord-1" });
-  assert.equal(own.data.user.mustChangePassword, false);
-  assert.equal((await new Client(dev.url).login("egenvalgt", "valgt-passord-1")).status, 200);
-
-  const patched = await admin.patch(`/api/admin/users/${user.id}`, { displayName: "Øyvind", role: "admin" });
-  assert.equal(patched.status, 200);
-  assert.deepEqual([patched.data.user.displayName, patched.data.user.role], ["Øyvind", "admin"]);
-  assert.equal((await admin.patch(`/api/admin/users/${user.id}`, {})).status, 400);
-  assert.equal((await admin.patch("/api/admin/users/9999", { role: "user" })).status, 404);
-
-  const me = (await admin.get("/api/auth/me")).data.user;
-  const demote = await admin.patch(`/api/admin/users/${me.id}`, { role: "user" });
-  assert.deepEqual([demote.status, demote.data.error], [400, "Du kan ikke fjerne din egen administratortilgang."]);
-  const disable = await admin.patch(`/api/admin/users/${me.id}`, { disabled: true });
-  assert.deepEqual([disable.status, disable.data.error], [400, "Du kan ikke deaktivere din egen konto."]);
-
-  const reset = await admin.post(`/api/admin/users/${user.id}/reset-password`);
-  assert.equal(reset.status, 200);
-  assert.match(reset.data.password, /^[A-Za-z2-9]{14}$/);
-  assert.equal((await oyvind.get("/api/auth/me")).status, 401, "gamle økter avsluttes");
-  assert.equal((await new Client(dev.url).login("Øyvind", password)).status, 401);
-  assert.equal((await new Client(dev.url).login("Øyvind", reset.data.password)).status, 200);
-
-  const events = await dev.sql("SELECT type, data_json FROM events WHERE type LIKE 'user.%' ORDER BY id");
-  const types = events.map((e) => e.type);
-  for (const t of ["user.seeded", "user.created", "user.updated", "user.password_reset"]) assert.ok(types.includes(t), t);
-  const dump = JSON.stringify(events);
-  assert.ok(!dump.includes(password) && !dump.includes(reset.data.password), "passord logges aldri");
+test("manuell opplasting av oversettelse gjør filen ferdig, og Svetlana kan laste den ned", async () => {
+  const sending = await svetlana.send({ "manuell.docx": "original" });
+  const id = sending.files[0].id;
+  const res = await admin.put(`/api/admin/files/${id}/result?name=${encodeURIComponent("manuell (norsk).docx")}`, "håndlaget");
+  assert.equal(res.status, 200, JSON.stringify(res.data));
+  const file = res.data.sending.files[0];
+  assert.deepEqual([file.status, file.outputSource, file.outputName], ["done", "manual", "manuell (norsk).docx"]);
+  assert.equal(res.data.sending.status, "done");
+  assert.equal((await svetlana.get(`/api/files/${id}/result`)).data.toString(), "håndlaget");
+  assert.equal((await svetlana.put(`/api/admin/files/${id}/result?name=x.docx`, "x")).status, 403);
 });
 
-test("økter: listen viser min egen økt", async () => {
-  const sessions = (await admin.get("/api/admin/sessions")).data.sessions;
-  const mine = sessions.filter((s) => s.current);
-  assert.equal(mine.length, 1);
-  assert.equal(mine[0].username, "admin");
-  assert.match(mine[0].idPrefix, /^[0-9a-f]{8}$/);
-  assert.equal(mine[0].userAgent, "node");
-  assert.equal(mine[0].ip, "127.0.0.1");
-  assert.equal((await admin.post("/api/admin/sessions/ikke-hex/revoke")).status, 400);
+test("status: sett i kø igjen, merk som feilet med melding til Svetlana, og ferdig bare med resultat", async () => {
+  const sending = await svetlana.send({ "status.txt": "Hello" });
+  const id = sending.files[0].id;
+  const failed = await admin.post(`/api/admin/files/${id}/status`, { status: "failed", message: "Dette er et skannet bilde – send gjerne originalen." });
+  assert.equal(failed.status, 200);
+  assert.equal(failed.data.sending.status, "done", "alle filer ferdige");
+  const mine = (await svetlana.get(`/api/sendings/${sending.id}`)).data.sending.files[0];
+  assert.equal(mine.statusText, "Dette er et skannet bilde – send gjerne originalen.");
+  assert.equal((await admin.post(`/api/admin/files/${id}/status`, { status: "done" })).status, 409, "ingen oversettelse ennå");
+  assert.equal((await admin.post(`/api/admin/files/${id}/status`, { status: "working" })).status, 400);
+
+  const requeued = await admin.post(`/api/admin/files/${id}/status`, { status: "sent" });
+  assert.equal(requeued.data.sending.status, "sent", "sendingen er åpen igjen");
+  assert.ok((await agent.post("/api/agent/poll", {})).data.files.some((f) => f.id === id), "agenten ser filen igjen");
+  await agent.post(`/api/agent/files/${id}/claim`);
+  await agent.put(`/api/agent/files/${id}/result?name=status.txt`, "Hei");
+  await admin.post(`/api/admin/files/${id}/status`, { status: "failed" });
+  const done = await admin.post(`/api/admin/files/${id}/status`, { status: "done" });
+  assert.equal(done.data.sending.files[0].status, "done", "har resultat → kan merkes ferdig");
+  const [event] = await dev.sql("SELECT message, source FROM events WHERE type = 'file.status_changed' ORDER BY id DESC LIMIT 1");
+  assert.equal(event.message, "status.txt: failed → done");
 });
 
-test("jobber: liste med brukernavn og detaljer med filer, hendelser og kall", async () => {
-  const jobs = (await admin.get("/api/admin/jobs")).data.jobs;
-  const row = jobs.find((j) => j.id === job.job.id);
-  assert.equal(row.username, "Svetlana");
-  assert.equal(row.status, "partial");
-  assert.equal(row.deleted, false);
-  const filtered = (await admin.get(`/api/admin/jobs?userId=${job.job.userId + 1000}`)).data.jobs;
-  assert.equal(filtered.length, 0);
-
-  const detail = (await admin.get(`/api/admin/jobs/${job.job.id}`)).data;
-  assert.equal(detail.job.username, "Svetlana");
-  assert.equal(detail.files.length, 2);
-  const failed = detail.files.find((f) => f.status === "failed");
-  assert.ok("errorDetails" in failed && failed.deleted === false);
-  assert.match(failed.error, /^\[bad_response\]/);
-  assert.ok(detail.events.some((e) => e.type === "job.finished"));
-  assert.ok(detail.events.every((e, i) => i === 0 || detail.events[i - 1].id < e.id), "eldste først");
-  assert.ok(detail.calls.length >= 2);
-  const call = detail.calls.find((c) => c.ok);
-  assert.deepEqual(
-    Object.keys(call).sort(),
-    ["attempt", "error", "fileId", "id", "inputChars", "inputTokens", "items", "model", "ms", "ok", "outputChars", "outputTokens", "reasoningTokens", "status", "ts"]
-  );
-  assert.equal(call.status, 200);
-  assert.ok(detail.calls.some((c) => !c.ok && c.status === 400));
-  assert.equal((await admin.get("/api/admin/jobs/finnes-ikke")).status, 404);
-});
-
-test("test av API-tilkoblingen: ett lite kall, maks én gang i minuttet", async () => {
-  const before = mock.state.calls;
-  const res = await admin.post("/api/admin/test-api");
+test("svar til Svetlana vises på sendingen hennes", async () => {
+  const sending = await svetlana.send({ "svar.txt": "Hello" });
+  const res = await admin.post(`/api/admin/sendings/${sending.id}/reply`, { reply: "Takk, Svetlana! Ferdig i kveld 😊" });
   assert.equal(res.status, 200);
-  assert.equal(res.data.ok, true);
-  assert.equal(res.data.sample, "OK");
-  assert.ok(Number.isFinite(res.data.ms));
-  assert.equal(mock.state.calls, before + 1);
-  const again = await admin.post("/api/admin/test-api");
-  assert.equal(again.status, 429);
-  assert.equal(mock.state.calls, before + 1);
-  const rows = await dev.sql("SELECT ok, job_id FROM grok_calls WHERE job_id IS NULL");
-  assert.deepEqual(rows, [{ ok: 1, job_id: null }]);
-  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = 'admin.test_api'"))[0].n, 1);
+  assert.equal((await svetlana.get(`/api/sendings/${sending.id}`)).data.sending.reply, "Takk, Svetlana! Ferdig i kveld 😊");
+  assert.equal((await admin.post("/api/admin/sendings/finnesikke/reply", { reply: "x" })).status, 404);
 });
 
-test("klientlogg: krever innlogging og CSRF, kutter lange felt og bremser etter 30 per minutt", async () => {
-  assert.equal((await new Client(dev.url).post("/api/client-log", { message: "x" })).status, 401);
-  const client = await loggedIn(dev.url, "Svetlana", V.SEED_USER_PASSWORD);
-  assert.equal((await client.req("POST", "/api/client-log", { json: { message: "x" }, csrf: false })).status, 403);
-  const long = await client.post("/api/client-log", { level: "warn", message: "m".repeat(900), stack: "s".repeat(5000) });
-  assert.equal(long.status, 204);
-  const [row] = await dev.sql("SELECT level, message, data_json FROM events WHERE type = 'client.error' ORDER BY id DESC LIMIT 1");
-  assert.equal(row.level, "warn");
-  assert.equal(row.message.length, 500);
-  assert.equal(JSON.parse(row.data_json).stack.length, 4000);
-  for (let i = 1; i < 30; i++) assert.equal((await client.post("/api/client-log", { message: `feil ${i}` })).status, 204);
-  assert.equal((await client.post("/api/client-log", { message: "for mye" })).status, 429);
-  assert.equal((await svetlana.post("/api/client-log", { message: "annen økt" })).status, 204, "grensen gjelder per økt");
+test("logg: filtrer på nivå, type (prefiks), kilde og tekst, og bla bakover", async () => {
+  const get = async (q) => (await admin.get(`/api/admin/events?${q}`)).data;
+  const warn = await get("level=warn&limit=500");
+  assert.ok(warn.events.length > 0 && warn.events.every((e) => e.level === "warn"));
+  const auth = await get("type=auth.&limit=500");
+  assert.ok(auth.events.every((e) => e.type.startsWith("auth.")));
+  assert.ok(auth.events.some((e) => e.type === "auth.login" && e.username === "eier"));
+  const exact = await get("type=file.claimed");
+  assert.ok(exact.events.length > 0 && exact.events.every((e) => e.type === "file.claimed" && e.source === "agent"));
+  assert.ok((await get("source=agent&limit=500")).events.every((e) => e.source === "agent"));
+  const text = await get(`q=${encodeURIComponent("manuell.docx")}`);
+  assert.ok(text.events.some((e) => e.type === "file.uploaded"));
+  assert.deepEqual((await get(`q=${encodeURIComponent("100%_")}`)).events, [], "% og _ er vanlige tegn i søket");
+
+  const page1 = await get("limit=5");
+  assert.equal(page1.events.length, 5);
+  assert.deepEqual(page1.events.map((e) => e.id), [...page1.events.map((e) => e.id)].sort((a, b) => b - a), "nyeste først");
+  const page2 = await get(`limit=5&beforeId=${page1.nextBeforeId}`);
+  assert.ok(page2.events.every((e) => e.id < page1.events[4].id));
+  const sample = page1.events[0];
+  for (const key of ["id", "ts", "level", "type", "message", "source", "userId", "username", "sessionId", "sendingId", "fileId", "ip", "data"]) {
+    assert.ok(key in sample, key);
+  }
+});
+
+test("økter: list og avslutt en bestemt økt", async () => {
+  const victim = await dev.login("svetlana");
+  const idPrefix = crypto.createHash("sha256").update(victim.cookie.split("=")[1]).digest("hex").slice(0, 8);
+  const row = (await admin.get("/api/admin/sessions")).data.sessions.find((s) => s.idPrefix === idPrefix);
+  assert.equal(row.username, "svetlana");
+  assert.equal(row.active, true);
+  assert.equal("id" in row, false, "full økt-id sendes aldri ut");
+  assert.ok((await admin.get("/api/admin/sessions")).data.sessions.find((s) => s.current).username === "eier");
+  assert.equal((await admin.post(`/api/admin/sessions/${idPrefix}/revoke`)).status, 204);
+  assert.equal((await victim.get("/api/auth/me")).status, 401);
+  assert.equal((await svetlana.get("/api/auth/me")).status, 200, "andre økter lever");
+  assert.equal((await admin.post(`/api/admin/sessions/${idPrefix}/revoke`)).status, 404);
+  assert.equal((await admin.post("/api/admin/sessions/xyz/revoke")).status, 400);
+  const all = (await admin.get("/api/admin/sessions?all=1")).data.sessions;
+  assert.ok(all.find((s) => s.idPrefix === idPrefix && s.revokedReason === "admin"));
+});
+
+test("brukere: opprett med bevis fra nettleseren, endre, deaktiver og nytt passord", async () => {
+  const create = (body) => admin.post("/api/admin/users", { role: "user", ...body });
+  assert.equal((await create({ username: "ugyldig navn", ...newSecret("passord-123") })).status, 400);
+  assert.equal((await create({ username: "Vera", salt: "kort", iterations: 310000, proof: "x" })).status, 400);
+  assert.equal((await create({ username: "Vera", ...newSecret("passord-123"), iterations: 1000 })).status, 400);
+  assert.equal((await create({ username: "Vera", ...newSecret("passord-123"), role: "sjef" })).status, 400);
+  const res = await create({ username: "Vera", displayName: "Vera V.", ...newSecret("vera-passord-1") });
+  assert.equal(res.status, 201);
+  assert.deepEqual(
+    { username: res.data.user.username, displayName: res.data.user.displayName, role: res.data.user.role, mustChangePassword: res.data.user.mustChangePassword },
+    { username: "Vera", displayName: "Vera V.", role: "user", mustChangePassword: true }
+  );
+  assert.equal((await create({ username: "vera", ...newSecret("x-passord-1") })).status, 409);
+  const [stored] = await dev.sql("SELECT salt, iterations, verifier FROM users WHERE username = 'Vera'");
+  assert.equal(stored.iterations, 310000);
+  assert.match(stored.verifier, /^[0-9a-f]{64}$/);
+  const vera = await dev.login("Vera", { password: "vera-passord-1" });
+  assert.equal((await vera.get("/api/auth/me")).data.user.mustChangePassword, true);
+
+  const id = res.data.user.id;
+  assert.equal((await admin.patch(`/api/admin/users/${id}`, { displayName: "Vera Veras" })).data.user.displayName, "Vera Veras");
+  const reset = await admin.post(`/api/admin/users/${id}/password`, { ...newSecret("nytt-vera-pass-2"), mustChangePassword: true });
+  assert.equal(reset.status, 200);
+  assert.equal((await vera.get("/api/auth/me")).status, 401, "gamle økter avsluttes");
+  assert.equal((await new Client(dev.url).login("Vera", "vera-passord-1")).status, 401);
+  assert.equal((await new Client(dev.url).login("Vera", "nytt-vera-pass-2")).status, 200);
+
+  const me = (await admin.get("/api/auth/me")).data.user.id;
+  assert.equal((await admin.patch(`/api/admin/users/${me}`, { role: "user" })).status, 400);
+  assert.equal((await admin.patch(`/api/admin/users/${me}`, { disabled: true })).status, 400);
+  assert.equal((await admin.patch(`/api/admin/users/${id}`, {})).status, 400);
+  assert.equal((await admin.patch("/api/admin/users/9999", { disabled: true })).status, 404);
+  const users = (await admin.get("/api/admin/users")).data.users;
+  assert.deepEqual(users.map((u) => u.username), ["eier", "svetlana", "Vera"]);
+  assert.ok(users.every((u) => !("verifier" in u) && !("salt" in u)));
+  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type IN ('user.created', 'user.updated', 'user.password_reset')"))[0].n, 3);
 });

@@ -1,23 +1,54 @@
-// Liten HTTP-klient for integrasjonstestene: husker innloggingskapselen og setter CSRF-hodet.
-const FINAL = ["done", "partial", "failed", "cancelled"];
+// Liten HTTP-klient for integrasjonstestene: husker innloggingskapselen, setter CSRF-hodet og logger inn
+// som nettleseren gjør (salt → PBKDF2-bevis → login). Med { bearer } er den Mac-agenten i stedet.
+const crypto = require("node:crypto");
+const { pbkdf2Proof, ITERATIONS } = require("../../scripts/make-user");
+
+// PBKDF2 med 310 000 runder tar ~0,1 s; samme passord og salt regnes bare ut én gang.
+const proofs = new Map();
+function proofFor(password, salt, iterations) {
+  const key = `${password}\0${salt}\0${iterations}`;
+  if (!proofs.has(key)) proofs.set(key, pbkdf2Proof(password, salt, iterations));
+  return proofs.get(key);
+}
+
+// Som newSaltedProof i nettleseren: nytt tilfeldig salt + bevis for et nytt passord.
+function newSecret(password) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  return { salt, iterations: ITERATIONS, proof: proofFor(password, salt, ITERATIONS) };
+}
+
+// Venter til fn() gir en sann verdi (f.eks. noe som logges etter svaret via waitUntil) og returnerer den.
+async function eventually(fn, { timeoutMs = 5000, what = "betingelsen" } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await fn();
+    if (value) return value;
+    if (Date.now() > deadline) throw new Error(`Tidsavbrudd: ${what} ble aldri oppfylt`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
 
 class Client {
-  constructor(base, { ip } = {}) {
+  constructor(base, { ip, bearer } = {}) {
     this.base = base;
     this.cookie = null;
     this.ip = ip;
+    this.bearer = bearer;
   }
 
-  async req(method, path, { json, body, headers = {}, csrf = true } = {}) {
+  async req(method, path, { json, body, headers = {}, csrf = !this.bearer } = {}) {
     const h = { ...headers };
     if (this.cookie) h.Cookie = this.cookie;
     if (this.ip) h["CF-Connecting-IP"] = this.ip;
+    if (this.bearer) h.Authorization = `Bearer ${this.bearer}`;
     if (csrf && !["GET", "HEAD"].includes(method)) h["X-InnNorsk"] = "1";
     if (json !== undefined) {
       h["Content-Type"] = "application/json";
       body = JSON.stringify(json);
     }
-    const res = await fetch(this.base + path, { method, headers: h, body, redirect: "manual" });
+    const init = { method, headers: h, body, redirect: "manual" };
+    if (body && typeof body.getReader === "function") init.duplex = "half";
+    const res = await fetch(this.base + path, init);
     const setCookie = res.headers.get("set-cookie");
     if (setCookie) {
       const pair = setCookie.split(";")[0];
@@ -37,6 +68,10 @@ class Client {
     return this.req("POST", path, { json, ...opts });
   }
 
+  put(path, body, opts = {}) {
+    return this.req("PUT", path, { body, ...opts });
+  }
+
   patch(path, json, opts = {}) {
     return this.req("PATCH", path, { json, ...opts });
   }
@@ -45,49 +80,32 @@ class Client {
     return this.req("DELETE", path, opts);
   }
 
-  login(username, password) {
-    return this.post("/api/auth/login", { username, password });
+  async login(username, password) {
+    const { data } = await this.post("/api/auth/salt", { username });
+    return this.post("/api/auth/login", { username, proof: proofFor(password, data.salt, data.iterations) });
   }
 
-  async newJob(targetLanguage = "bokmal") {
-    const res = await this.post("/api/jobs", { targetLanguage });
-    if (res.status !== 201) throw new Error(`Kunne ikke opprette jobb: ${res.status} ${JSON.stringify(res.data)}`);
-    return res.data.job;
+  async newSending(targetLanguage = "bokmal", note) {
+    const res = await this.post("/api/sendings", { targetLanguage, note });
+    if (res.status !== 201) throw new Error(`Kunne ikke opprette sending: ${res.status} ${JSON.stringify(res.data)}`);
+    return res.data.sending;
   }
 
-  upload(jobId, relPath, content) {
-    return this.req("PUT", `/api/jobs/${jobId}/files?path=${encodeURIComponent(relPath)}`, { body: content });
+  upload(sendingId, relPath, content, opts) {
+    return this.put(`/api/sendings/${sendingId}/files?path=${encodeURIComponent(relPath)}`, content, opts);
   }
 
-  async waitFor(jobId, { timeoutMs = 60000, until = (job) => FINAL.includes(job.status) } = {}) {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const res = await this.get(`/api/jobs/${jobId}`);
-      if (res.status !== 200) throw new Error(`GET jobb ga ${res.status}`);
-      if (until(res.data.job, res.data)) return res.data;
-      if (Date.now() > deadline) throw new Error(`Jobben ble ikke ferdig: ${JSON.stringify(res.data.job)}`);
-      await new Promise((r) => setTimeout(r, 200));
+  // Oppretter en sending, laster opp filene ({ sti: innhold }) og sender den. Returnerer sendingen.
+  async send(files, { targetLanguage, note } = {}) {
+    const sending = await this.newSending(targetLanguage, note);
+    for (const [relPath, content] of Object.entries(files)) {
+      const res = await this.upload(sending.id, relPath, content);
+      if (res.status !== 201) throw new Error(`Opplasting av ${relPath} ga ${res.status} ${JSON.stringify(res.data)}`);
     }
-  }
-
-  // Oppretter jobb, laster opp filene ({ path: innhold }), starter og venter til den er ferdig.
-  async translate(files, { targetLanguage, timeoutMs } = {}) {
-    const job = await this.newJob(targetLanguage);
-    for (const [path, content] of Object.entries(files)) {
-      const res = await this.upload(job.id, path, content);
-      if (res.status !== 201) throw new Error(`Opplasting av ${path} ga ${res.status} ${JSON.stringify(res.data)}`);
-    }
-    const started = await this.post(`/api/jobs/${job.id}/start`);
-    if (started.status !== 200) throw new Error(`Start ga ${started.status} ${JSON.stringify(started.data)}`);
-    return this.waitFor(job.id, { timeoutMs });
+    const sent = await this.post(`/api/sendings/${sending.id}/send`);
+    if (sent.status !== 200) throw new Error(`Send ga ${sent.status} ${JSON.stringify(sent.data)}`);
+    return sent.data.sending;
   }
 }
 
-async function loggedIn(base, username, password, opts) {
-  const client = new Client(base, opts);
-  const res = await client.login(username, password);
-  if (res.status !== 200) throw new Error(`Innlogging for ${username} ga ${res.status} ${JSON.stringify(res.data)}`);
-  return client;
-}
-
-module.exports = { Client, loggedIn, FINAL };
+module.exports = { Client, proofFor, newSecret, eventually };

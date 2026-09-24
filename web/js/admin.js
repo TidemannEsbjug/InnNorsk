@@ -1,697 +1,581 @@
 import {
-  api, h, fill, formatBytes, formatNumber, relativeTime, statusLabel, LANGUAGE_LABELS,
-  confirmDialog, logout, reportErrors,
+  api, upload, h, fill, icon, extBadge, dirName, baseName, plural, formatBytes, formatClock, formatDuration, formatNumber,
+  formatWhen, relativeTime, LANGUAGE_LABELS, confirmDialog, toast, logout, reportErrors, initMenu, newSaltedProof,
 } from "./api.js";
 
 reportErrors();
+initMenu();
 
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
-const TABS = ["oversikt", "jobber", "logg", "okter", "brukere"];
-const LEVEL_LABELS = { debug: "Feilsøking", info: "Info", warn: "Advarsel", error: "Feil" };
-const EVENT_TYPES = {
-  System: ["system.bootstrap", "user.seeded", "server.error", "client.error", "retention.sweep", "admin.test_api"],
-  Innlogging: ["auth.login", "auth.login_failed", "auth.locked", "auth.logout", "auth.password_changed", "session.revoked"],
-  Brukere: ["user.created", "user.updated", "user.password_reset"],
-  Jobber: ["job.created", "job.queued", "job.started", "job.finished", "job.cancelled", "job.failed", "job.deleted"],
-  Filer: ["file.uploaded", "file.rejected", "file.analyzed", "file.analysis_failed", "file.started", "file.done", "file.failed", "file.warning", "file.deleted"],
-  Grok: ["grok.retry", "grok.error"],
-  Nedlasting: ["download.file", "download.original", "download.zip"],
-};
-const PAGE = 100;
+const LOG_PAGE = 100;
+
+const STATUS = { draft: "Utkast", sent: "Venter", working: "Oversettes", done: "Ferdig", failed: "Feilet" };
+const SENDING_STATUS = { draft: "Utkast", sent: "Sendt", done: "Ferdig", deleted: "Slettet" };
+const AGENT_STATE = { idle: "Venter på filer", working: "Oversetter", error: "Har et problem" };
+const LEVELS = { info: "Info", warn: "Advarsel", error: "Feil" };
+const SOURCES = { web: "Nettside", agent: "Mac", ios: "iPhone", system: "System" };
 
 let me = null;
-let users = [];
-let activeTab = "";
-let logEvents = [];
-let logTimer = 0;
-let searchTimer = 0;
+let current = "";
+let timer = 0;
+let sendings = [];
+let resultTarget = null; // filen en manuell oversettelse skal lastes opp til
+const replyDrafts = new Map();
+const log = { events: [], more: false };
 
-// ---------- Formatering ----------
+// ---------- Små hjelpere ----------
 
-const pad = (n) => String(n).padStart(2, "0");
-
-function formatTs(iso) {
-  const d = new Date(iso);
-  if (!iso || Number.isNaN(d.getTime())) return "–";
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+function panelError(name, message) {
+  const box = $(`panel-${name}`).querySelector(".panel-error");
+  fill(box, message ? h("p", null, message) : null);
+  box.hidden = !message;
 }
 
-// Nøyaktig varighet for feilsøking: "48 s", "5 min 12 s", "2 t 3 min", "3 d 4 t".
-function formatElapsed(seconds) {
-  if (seconds == null || !Number.isFinite(seconds)) return "–";
-  const s = Math.round(seconds);
-  if (s < 60) return `${s} s`;
-  if (s < 3600) return `${Math.floor(s / 60)} min ${s % 60} s`;
-  if (s < 86400) return `${Math.floor(s / 3600)} t ${Math.floor((s % 3600) / 60)} min`;
-  return `${Math.floor(s / 86400)} d ${Math.floor((s % 86400) / 3600)} t`;
+function pill(status, text) {
+  return h("span", { class: `pill pill-${status}` }, h("span", { class: "dot", "aria-hidden": "true" }), text);
 }
 
-function formatMs(ms) {
-  if (ms == null) return "–";
-  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toLocaleString("nb-NO", { maximumFractionDigits: 1 })} s`;
+function button(label, onclick, cls = "btn btn-secondary btn-small") {
+  return h("button", { type: "button", class: cls, onclick }, label);
 }
 
-function decimal(n, digits) {
-  return n == null ? "–" : Number(n).toLocaleString("nb-NO", { minimumFractionDigits: digits, maximumFractionDigits: digits });
-}
-
-function secondsBetween(from, to) {
-  return from && to ? (new Date(to) - new Date(from)) / 1000 : null;
-}
-
-function userName(id) {
-  if (id == null) return "";
-  const user = users.find((u) => u.id === id);
-  return user ? user.username : `#${id}`;
-}
-
-function deviceLabel(ua) {
-  const s = ua || "";
-  const browser = /Edg\//.test(s) ? "Edge"
-    : /OPR\/|Opera/.test(s) ? "Opera"
-      : /Firefox\/|FxiOS/.test(s) ? "Firefox"
-        : /Chrome\/|CriOS/.test(s) ? "Chrome"
-          : /Safari\//.test(s) ? "Safari" : "Ukjent nettleser";
-  const os = /iPhone/.test(s) ? "iPhone"
-    : /iPad/.test(s) ? "iPad"
-      : /Android/.test(s) ? "Android"
-        : /Windows/.test(s) ? "Windows"
-          : /Macintosh|Mac OS X/.test(s) ? "Mac"
-            : /Linux/.test(s) ? "Linux" : "";
-  return os ? `${browser} på ${os}` : browser;
-}
-
-// Serverdata vises alltid som tekst (textContent), så det kan ikke tolkes som HTML.
-function pretty(value) {
-  if (typeof value !== "string") return JSON.stringify(value, null, 2);
+async function act(work, done) {
   try {
-    return JSON.stringify(JSON.parse(value), null, 2);
-  } catch {
-    return value;
-  }
-}
-
-// ---------- Små byggeklosser ----------
-
-function badge(status) {
-  return h("span", { class: `badge status-${status}` }, statusLabel(status));
-}
-
-function level(value) {
-  return h("span", { class: `lvl lvl-${value}` }, LEVEL_LABELS[value] || value);
-}
-
-function fact(label, ...value) {
-  return h("div", null, h("dt", null, label), h("dd", null, ...value));
-}
-
-function stat(label, value, sub, bad) {
-  return h("div", { class: `stat${bad ? " is-bad" : ""}` },
-    h("p", { class: "stat-label" }, label),
-    h("p", { class: "stat-value" }, value),
-    sub ? h("p", { class: "stat-sub" }, sub) : null
-  );
-}
-
-function table(headers, rows, emptyText) {
-  return h("div", { class: "table-wrap" },
-    h("table", { class: "data" },
-      h("thead", null, h("tr", null, headers.map((t) => h("th", null, t)))),
-      h("tbody", null, rows.length ? rows : emptyRow(headers.length, emptyText))
-    )
-  );
-}
-
-function emptyRow(cols, text) {
-  return h("tr", { class: "empty-row" }, h("td", { colSpan: cols }, text));
-}
-
-function dataDetails(data, label = "Data") {
-  if (data == null || data === "" || (typeof data === "object" && !Object.keys(data).length)) return null;
-  return h("details", { class: "json" }, h("summary", null, label), h("pre", null, pretty(data)));
-}
-
-function tokens(usage) {
-  if (!usage) return "–";
-  return `${formatNumber(usage.inputTokens)} / ${formatNumber(usage.outputTokens)}`;
-}
-
-function panelError(panel, err) {
-  const el = $(`panel-${panel}`).querySelector(".panel-error");
-  el.textContent = err ? `Noe gikk galt: ${err.message}` : "";
-  el.hidden = !err;
-}
-
-async function guarded(panel, fn) {
-  try {
-    panelError(panel, null);
-    await fn();
+    await work();
+    if (done) toast(done);
+    await load();
   } catch (err) {
-    panelError(panel, err);
+    toast(err.message);
   }
+}
+
+function copy(text) {
+  navigator.clipboard.writeText(text).then(
+    () => toast("Kopiert!"),
+    () => toast("Kunne ikke kopiere automatisk. Marker teksten og kopier den selv.")
+  );
+}
+
+// 14 tegn uten forvekslbare tegn (0/O, 1/l/I), trukket uten skjevhet.
+function generatePassword(length = 14) {
+  const alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const limit = 256 - (256 % alphabet.length);
+  let out = "";
+  while (out.length < length) {
+    for (const b of crypto.getRandomValues(new Uint8Array(32))) {
+      if (b < limit && out.length < length) out += alphabet[b % alphabet.length];
+    }
+  }
+  return out;
+}
+
+// "Safari på iPhone", "Chrome på Windows", "InnNorsk Varsel (iPhone)".
+function describeAgent(ua = "") {
+  if (/CFNetwork|InnNorsk/i.test(ua)) return "InnNorsk Varsel (iPhone)";
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+    : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
+  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome"
+    : /Safari\//.test(ua) ? "Safari" : "";
+  return [browser, os].filter(Boolean).join(" på ") || ua.slice(0, 60) || "Ukjent nettleser";
 }
 
 // ---------- Faner ----------
 
-const LOADERS = {
-  oversikt: loadOverview,
-  jobber: loadJobs,
-  logg: loadEvents,
-  okter: loadSessions,
-  brukere: loadUsers,
+const TABS = {
+  oversikt: { load: loadOverview, every: 10000 },
+  sendinger: { load: loadSendings, every: 10000 },
+  logg: { load: loadLog, auto: mergeLog, every: 5000 },
+  okter: { load: loadSessions },
+  brukere: { load: loadUsers },
 };
+const NAMES = Object.keys(TABS);
 
-function selectTab(name, focus = false) {
-  activeTab = TABS.includes(name) ? name : "oversikt";
-  for (const t of TABS) {
-    const on = t === activeTab;
-    const tab = $(`tab-${t}`);
+function select(name, focus) {
+  current = name;
+  for (const key of NAMES) {
+    const on = key === name;
+    const tab = $(`tab-${key}`);
     tab.setAttribute("aria-selected", String(on));
     tab.tabIndex = on ? 0 : -1;
-    $(`panel-${t}`).hidden = !on;
+    $(`panel-${key}`).hidden = !on;
   }
-  if (focus) $(`tab-${activeTab}`).focus();
-  if (location.hash !== `#${activeTab}`) history.replaceState(null, "", `#${activeTab}`);
-  guarded(activeTab, LOADERS[activeTab]);
-  syncLogTimer();
+  if (focus) $(`tab-${name}`).focus();
+  history.replaceState(null, "", `#${name}`);
+  load();
 }
 
-function setupTabs() {
-  for (const t of TABS) $(`tab-${t}`).addEventListener("click", () => selectTab(t));
-  document.querySelector("[role=tablist]").addEventListener("keydown", (e) => {
-    const i = TABS.indexOf(activeTab);
-    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: TABS.length - 1 }[e.key];
-    if (next == null) return;
-    e.preventDefault();
-    selectTab(TABS[(next + TABS.length) % TABS.length], true);
-  });
-  window.addEventListener("hashchange", () => {
-    const name = location.hash.slice(1);
-    if (name !== activeTab) selectTab(name);
-  });
+async function load(auto = false) {
+  clearTimeout(timer);
+  const name = current;
+  const tab = TABS[name];
+  try {
+    await (auto && tab.auto ? tab.auto : tab.load)(auto);
+    panelError(name, "");
+  } catch (err) {
+    panelError(name, err.message);
+  }
+  if (name === current && tab.every && !document.hidden) timer = setTimeout(() => load(true), tab.every);
 }
+
+// Automatisk oppdatering skal ikke overskrive noe man holder på å skrive.
+function busyTyping() {
+  const el = document.activeElement;
+  return Boolean(el && el.matches("textarea, input:not([type=checkbox]), select") && $(`panel-${current}`).contains(el));
+}
+
+for (const name of NAMES) $(`tab-${name}`).addEventListener("click", () => select(name));
+document.querySelector(".tabs").addEventListener("keydown", (e) => {
+  const i = NAMES.indexOf(current);
+  const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: NAMES.length - 1 }[e.key];
+  if (next === undefined) return;
+  e.preventDefault();
+  select(NAMES[(next + NAMES.length) % NAMES.length], true);
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) load(true);
+});
 
 // ---------- Oversikt ----------
 
 async function loadOverview() {
-  const o = await api("/api/admin/overview");
-  $("key-banner").hidden = Boolean(o.apiKeyConfigured);
-  const t = o.tokens24h || {};
-  const storage = o.storage || {};
+  const [overview, { devices }] = await Promise.all([api("/api/admin/overview"), api("/api/admin/devices")]);
+  renderAgent(overview.agent || {});
+  renderStats(overview);
+  renderDevices(devices || []);
+}
+
+function renderAgent(agent) {
+  const seen = agent.lastSeenAt;
+  const grok = agent.grokOk == null ? "ukjent" : agent.grokOk ? "virker" : "virker ikke";
+  fill($("agent"),
+    h("div", { class: `agent-status ${agent.online ? "is-online" : "is-offline"}` },
+      h("span", { class: "agent-dot", "aria-hidden": "true" }),
+      h("div", null,
+        h("h2", null, agent.online ? "Mac-en er på nett" : "Mac-en svarer ikke"),
+        h("p", { class: "muted" }, seen
+          ? `Sist sett ${relativeTime(seen)} (kl. ${formatClock(seen)})`
+          : "Mac-en har ikke meldt seg ennå. Kjør «node mac/innnorsk-mottak.js setup» på Mac-en."))),
+    agent.stateMessage
+      ? h("p", { class: `notice ${agent.state === "error" ? "notice-error" : "notice-soft"}` }, agent.stateMessage)
+      : null,
+    seen
+      ? h("dl", { class: "facts" },
+        h("div", null, h("dt", null, "Tilstand"), h("dd", null, AGENT_STATE[agent.state] || agent.state || "–")),
+        h("div", null, h("dt", null, "Grok CLI"), h("dd", { class: agent.grokOk === false ? "bad" : "" }, grok)),
+        h("div", null, h("dt", null, "Maskin"), h("dd", null, agent.host || "–")),
+        h("div", null, h("dt", null, "Versjon"), h("dd", null, agent.version || "–")))
+      : null
+  );
+}
+
+function renderStats({ counts = {}, storage = {}, users }) {
+  const tile = (value, label, cls = "") => h("div", { class: `stat ${cls}` }, h("span", { class: "stat-value" }, value), h("span", { class: "stat-label" }, label));
   fill($("stats"),
-    stat("Brukere", formatNumber(o.users)),
-    stat("Aktive økter", formatNumber(o.activeSessions)),
-    stat("Jobber siste 24 t", formatNumber(o.jobs24h)),
-    stat("Feilede filer siste 24 t", formatNumber(o.failedFiles24h), null, o.failedFiles24h > 0),
-    stat("API-kall siste 24 t", formatNumber(o.calls24h)),
-    stat("Tokens siste 24 t", formatNumber((t.input || 0) + (t.output || 0)), `${formatNumber(t.input)} inn · ${formatNumber(t.output)} ut`),
-    stat("Modell", o.model || "–", o.apiKeyConfigured ? "API-nøkkelen er satt" : "API-nøkkelen mangler", !o.apiKeyConfigured),
-    stat("Lagring", formatBytes(storage.bytes), `${formatNumber(storage.objects)} filer`)
-  );
-  const est = o.estimator || {};
-  const acc = est.accuracy || {};
-  fill($("estimator"),
-    fact("Kilde", est.source === "fitted"
-      ? `Tilpasset fra ${formatNumber(est.samples)} API-kall`
-      : `Standardverdier (${formatNumber(est.samples)} vellykkede kall så langt)`),
-    fact("Tid per batch", `${decimal(est.a, 1)} s + ${decimal(est.b, 4)} s per tegn`),
-    fact("Treffsikkerhet", acc.jobs
-      ? `Median avvik ${decimal(acc.medianAbsPctError, 0)} % over ${formatNumber(acc.jobs)} ${acc.jobs === 1 ? "jobb" : "jobber"}`
-      : "Ingen ferdige jobber å sammenligne med ennå.")
+    tile(formatNumber(counts.waiting), "Venter"),
+    tile(formatNumber(counts.working), "Oversettes nå"),
+    tile(formatNumber(counts.doneToday), "Ferdig i dag"),
+    tile(formatNumber(counts.failed), "Feilet", counts.failed ? "stat-bad" : ""),
+    tile(formatBytes(storage.bytes), `Lagret · ${plural(storage.files || 0, "fil", "filer")}`),
+    typeof users === "number" ? tile(formatNumber(users), "Brukere") : null
   );
 }
 
-async function testApi() {
-  const ok = await confirmDialog({
-    title: "Teste API-tilkoblingen?",
-    text: "Dette sender én liten forespørsel til xAI og koster et lite API-kall. Du kan teste én gang i minuttet.",
-    confirm: "Ja, test nå",
-  });
-  if (!ok) return;
-  const button = $("btn-test-api");
-  const result = $("test-result");
-  button.disabled = true;
-  result.className = "result-line";
-  result.textContent = "Tester …";
-  try {
-    const r = await api("/api/admin/test-api", { method: "POST" });
-    result.classList.add(r.ok ? "ok" : "bad");
-    result.textContent = r.ok
-      ? `Tilkoblingen virker (${formatMs(r.ms)}).${r.sample ? ` Grok svarte: «${r.sample}»` : ""}`
-      : `Feilet: ${r.error || "ukjent feil"}`;
-  } catch (err) {
-    result.classList.add("bad");
-    result.textContent = `Feilet: ${err.message}`;
-  } finally {
-    button.disabled = false;
+function renderDevices(devices) {
+  if (!devices.length) {
+    fill($("devices"), h("li", { class: "muted" }, "Ingen iPhone er registrert ennå. Åpne InnNorsk Varsel på telefonen og logg inn som admin."));
+    return;
   }
+  fill($("devices"), devices.map((d) => h("li", { class: "item" },
+    h("div", { class: "item-main" },
+      h("p", null, h("strong", null, d.name || "iPhone"), " ", pill(d.disabledAt ? "failed" : "done", d.disabledAt ? "Deaktivert" : "Aktiv"), " ", h("span", { class: "tag" }, d.env)),
+      h("p", { class: "muted small" }, `Registrert ${formatWhen(d.createdAt)}`, d.lastOkAt ? ` · sist varslet ${relativeTime(d.lastOkAt)}` : ""),
+      d.lastError ? h("p", { class: "small bad" }, d.lastError) : null),
+    button("Fjern", async () => {
+      const ok = await confirmDialog({ title: "Fjerne denne enheten?", text: "Den får ikke flere varsler før appen registrerer seg på nytt.", confirm: "Fjern", danger: true });
+      if (ok) act(() => api(`/api/admin/devices/${enc(d.token)}`, { method: "DELETE" }), "Enheten er fjernet.");
+    })
+  )));
 }
 
-// ---------- Jobber ----------
-
-async function loadJobs() {
-  const userId = $("jobs-user").value;
-  const { jobs } = await api(`/api/admin/jobs?limit=50${userId ? `&userId=${enc(userId)}` : ""}`);
-  $("jobs-table").tBodies[0].replaceChildren(...(jobs.length ? jobs.map(jobRow) : [emptyRow(8, "Ingen jobber ennå.")]));
-}
-
-function estimateVsActual(estimate, actual) {
-  if (estimate == null) return "–";
-  if (actual == null || !(estimate > 0)) return `${formatElapsed(estimate)} / –`;
-  const pct = Math.round(((actual - estimate) / estimate) * 100);
-  return h("span", null,
-    `${formatElapsed(estimate)} / ${formatElapsed(actual)} `,
-    h("span", { class: `delta${Math.abs(pct) > 50 ? " bad" : ""}` }, `(${pct > 0 ? "+" : ""}${pct} %)`)
-  );
-}
-
-function jobRow(job) {
-  return h("tr", { "data-job": job.id },
-    h("td", { class: "nowrap" }, h("button", { type: "button", class: "btn-link", onclick: () => openDrill(job.id) }, formatTs(job.createdAt))),
-    h("td", null, job.username || userName(job.userId)),
-    h("td", null, LANGUAGE_LABELS[job.targetLanguage] || job.targetLanguage || "–"),
-    h("td", { class: "num" }, formatNumber(job.fileCount)),
-    h("td", null, badge(job.status), job.deleted ? h("span", { class: "deleted" }, "slettet av bruker") : null),
-    h("td", { class: "nowrap" }, estimateVsActual(job.estimateSeconds, secondsBetween(job.startedAt, job.finishedAt))),
-    h("td", { class: "num" }, formatNumber(job.usage && job.usage.calls)),
-    h("td", { class: "num nowrap" }, tokens(job.usage))
-  );
-}
-
-function fileRow(jobId, f) {
-  const base = `/api/jobs/${enc(jobId)}/files/${enc(f.id)}`;
-  const warnings = (f.warnings || []).map((w) => (typeof w === "string" ? w : w.message || w.code));
-  return h("tr", { class: f.status === "failed" ? "row-error" : "" },
-    h("td", { class: "msg" }, f.path || f.name),
-    h("td", null, badge(f.status)),
-    h("td", { class: "num" }, formatNumber(f.chars)),
-    h("td", { class: "num" }, formatNumber(f.batches)),
-    h("td", { class: "nowrap" }, f.estimateSeconds != null ? formatElapsed(f.estimateSeconds) : "–"),
-    h("td", { class: "nowrap" }, f.durationMs != null ? formatElapsed(f.durationMs / 1000) : "–"),
-    h("td", { class: "msg" },
-      f.message || "",
-      f.error && f.error !== f.message ? h("div", { class: "hint mono" }, f.error) : null,
-      dataDetails(f.errorDetails, "Feildetaljer"),
-      warnings.length ? h("details", { class: "json" },
-        h("summary", null, `${warnings.length} ${warnings.length === 1 ? "advarsel" : "advarsler"}`),
-        h("ul", null, warnings.map((w) => h("li", null, w)))) : null
-    ),
-    h("td", { class: "nowrap" },
-      h("a", { href: `${base}/original`, download: "" }, "Original"),
-      f.status === "done" ? [" · ", h("a", { href: `${base}/download`, download: "" }, "Resultat")] : null
-    )
-  );
-}
-
-function callRow(names, c) {
-  return h("tr", { class: c.ok ? "" : "row-error" },
-    h("td", { class: "nowrap" }, formatTs(c.ts)),
-    h("td", { class: "msg" }, names.get(c.fileId) || "–"),
-    h("td", { class: "num" }, c.status || "–"),
-    h("td", { class: "num" }, c.attempt),
-    h("td", { class: "num" }, c.items),
-    h("td", { class: "num nowrap" }, `${formatNumber(c.inputChars)} / ${formatNumber(c.outputChars)}`),
-    h("td", { class: "num nowrap" }, formatMs(c.ms)),
-    h("td", { class: "num nowrap" }, `${formatNumber(c.inputTokens)} / ${formatNumber(c.outputTokens)} / ${formatNumber(c.reasoningTokens)}`),
-    h("td", { class: "msg" }, c.error || "")
-  );
-}
-
-function timelineItem(e) {
-  return h("li", { class: `row-${e.level}` },
-    h("span", { class: "tl-time" }, formatTs(e.ts)),
-    level(e.level),
-    h("code", null, e.type),
-    h("span", null, e.message),
-    dataDetails(e.data)
-  );
-}
-
-function closeDrill() {
-  $("drill").hidden = true;
-  for (const row of $("jobs-table").tBodies[0].rows) row.classList.remove("is-selected");
-}
-
-async function openDrill(id) {
-  const drill = $("drill");
-  for (const row of $("jobs-table").tBodies[0].rows) row.classList.toggle("is-selected", row.dataset.job === id);
-  drill.hidden = false;
-  fill(drill, h("p", null, "Henter jobben …"));
-  drill.scrollIntoView({ behavior: "smooth", block: "start" });
+$("btn-test-push").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  $("push-result").textContent = "Sender …";
   try {
-    const { job, files = [], events = [], calls = [] } = await api(`/api/admin/jobs/${enc(id)}`);
-    const names = new Map(files.map((f) => [f.id, f.path || f.name]));
-    const usage = job.usage || {};
-    fill(drill,
-      h("div", { class: "drill-head" },
-        h("h2", null, "Jobb ", h("code", null, job.id), badge(job.status),
-          job.deleted ? h("span", { class: "deleted" }, "slettet av bruker") : null),
-        h("button", { type: "button", class: "btn btn-secondary btn-small", onclick: closeDrill }, "Lukk")
-      ),
-      h("dl", { class: "facts" },
-        fact("Bruker", job.username || userName(job.userId)),
-        fact("Språk", LANGUAGE_LABELS[job.targetLanguage] || job.targetLanguage || "–"),
-        fact("Modell", job.model || "–"),
-        fact("Opprettet", formatTs(job.createdAt)),
-        fact("Startet", formatTs(job.startedAt)),
-        fact("Ferdig", formatTs(job.finishedAt)),
-        fact("Estimert / faktisk", estimateVsActual(job.estimateSeconds, secondsBetween(job.startedAt, job.finishedAt))),
-        fact("Tegn", formatNumber(job.totals && job.totals.chars)),
-        fact("API-kall", formatNumber(usage.calls)),
-        fact("Tokens inn / ut", tokens(usage))
-      ),
-      job.error ? h("p", { class: "form-error" }, job.error) : null,
-      h("h3", null, `Filer (${files.length})`),
-      table(["Fil", "Status", "Tegn", "Batcher", "Estimert", "Tid", "Melding / feil", "Last ned"],
-        files.map((f) => fileRow(job.id, f)), "Ingen filer."),
-      h("h3", null, `Grok-kall (${calls.length})`),
-      table(["Tid", "Fil", "HTTP", "Forsøk", "Biter", "Tegn inn / ut", "Svartid", "Tokens inn / ut / tenk", "Feil"],
-        calls.map((c) => callRow(names, c)), "Ingen API-kall registrert."),
-      h("h3", null, `Hendelser (${events.length})`),
-      events.length
-        ? h("ol", { class: "timeline" }, [...events].sort((a, b) => (a.id || 0) - (b.id || 0)).map(timelineItem))
-        : h("p", { class: "hint" }, "Ingen hendelser.")
-    );
-    drill.focus({ preventScroll: true });
+    const { sent, failed, errors } = await api("/api/admin/test-push", { method: "POST" });
+    $("push-result").textContent = sent
+      ? `Testvarsel sendt til ${plural(sent, "enhet", "enheter")}.${failed ? ` ${failed} feilet: ${(errors || []).join(", ")}` : ""}`
+      : `Ingen varsler ble sendt.${errors && errors.length ? ` ${errors.join(", ")}` : " Er det registrert en iPhone?"}`;
   } catch (err) {
-    fill(drill, h("p", { class: "form-error" }, `Noe gikk galt: ${err.message}`));
+    $("push-result").textContent = err.message;
   }
+  btn.disabled = false;
+});
+
+// ---------- Sendinger ----------
+
+async function loadSendings(auto) {
+  if (auto && busyTyping()) return;
+  sendings = (await api("/api/admin/sendings?limit=50")).sendings || [];
+  const open = new Set([...$("sendings").querySelectorAll("details[open]")].map((d) => d.dataset.key));
+  $("sendings-count").textContent = `${plural(sendings.length, "sending", "sendinger")} (de siste 50)`;
+  fill($("sendings"), sendings.length
+    ? sendings.map((s) => sendingCard(s, open))
+    : h("p", { class: "card muted" }, "Ingen sendinger ennå."));
 }
+
+function countsText(c = {}) {
+  return [
+    c.done ? `${c.done} ferdig` : "",
+    c.working ? `${c.working} oversettes` : "",
+    c.waiting ? `${c.waiting} venter` : "",
+    c.failed ? `${c.failed} feilet` : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function sendingCard(s, open) {
+  const who = s.displayName || s.username || "Ukjent";
+  return h("article", { class: "card acard" },
+    h("div", { class: "acard-head" },
+      h("div", null,
+        h("h3", null, who, s.username && s.displayName ? h("span", { class: "muted" }, ` (${s.username})`) : null),
+        h("p", { class: "muted small" }, [
+          s.sentAt ? `Sendt ${formatWhen(s.sentAt)}` : `Opprettet ${formatWhen(s.createdAt)}`,
+          LANGUAGE_LABELS[s.targetLanguage],
+          plural(s.files.length, "fil", "filer"),
+          countsText(s.counts),
+        ].filter(Boolean).join(" · "))),
+      pill(s.status, SENDING_STATUS[s.status] || s.status)),
+    s.note ? h("p", { class: "my-note" }, h("span", { class: "muted" }, `Melding fra ${who}: `), `«${s.note}»`) : null,
+    h("ul", { class: "afiles" }, s.files.map((f) => adminFile(f, open))),
+    s.status === "draft" ? null : replyForm(s, who)
+  );
+}
+
+function adminFile(f, open) {
+  const facts = [
+    f.bytes != null ? formatBytes(f.bytes) : "",
+    f.attempts ? plural(f.attempts, "forsøk", "forsøk") : "",
+    f.costUsd != null ? `$${Number(f.costUsd).toFixed(4)}` : "",
+    f.outputSource === "manual" ? "lastet opp manuelt" : "",
+    f.status === "working" && f.progress ? `${Math.round(f.progress.percent)} %${f.progress.etaSeconds != null ? `, ${formatDuration(f.progress.etaSeconds)} igjen` : ""}` : "",
+    f.status === "working" && f.leaseUntil ? `lås til ${formatClock(f.leaseUntil)}` : "",
+    f.finishedAt ? `ferdig ${formatWhen(f.finishedAt)}` : "",
+  ].filter(Boolean).join(" · ");
+  const key = `err-${f.id}`;
+  return h("li", { class: "afile" },
+    extBadge(f.name),
+    h("div", { class: "afile-main" },
+      h("p", { class: "afile-name" }, dirName(f.path || "") ? h("span", { class: "q-dir" }, dirName(f.path)) : null, f.name || baseName(f.path)),
+      h("p", { class: "small" }, pill(f.status, STATUS[f.status] || f.status), " ", h("span", { class: "muted" }, facts)),
+      f.error ? h("p", { class: "small bad" }, f.error) : null,
+      f.errorDetails
+        ? h("details", { class: "small", "data-key": key, open: open.has(key) }, h("summary", null, "Tekniske detaljer"), h("pre", null, f.errorDetails))
+        : null),
+    h("div", { class: "afile-actions" },
+      h("a", { class: "btn-quiet", href: `/api/files/${enc(f.id)}/original`, download: "" }, icon("download"), "Original"),
+      f.status === "done" ? h("a", { class: "btn-quiet", href: `/api/files/${enc(f.id)}/result`, download: "" }, icon("download"), "Oversettelse") : null,
+      f.status === "draft" ? null : h("button", { type: "button", class: "btn-quiet", onclick: () => pickResult(f) }, icon("upload"), "Last opp oversettelse"),
+      ["failed", "working", "done"].includes(f.status)
+        ? h("button", { type: "button", class: "btn-quiet", onclick: () => act(() => api(`/api/admin/files/${enc(f.id)}/status`, { method: "POST", body: { status: "sent" } }), `${f.name} er satt i kø igjen.`) }, icon("refresh"), "Sett i kø igjen")
+        : null)
+  );
+}
+
+function replyForm(s, who) {
+  const id = `reply-${s.id}`;
+  const area = h("textarea", { id, rows: 2, maxLength: 2000, placeholder: `For eksempel: Her er det! Si fra om noe er uklart.` });
+  area.value = replyDrafts.has(s.id) ? replyDrafts.get(s.id) : s.reply || "";
+  area.addEventListener("input", () => replyDrafts.set(s.id, area.value));
+  return h("form", {
+    class: "reply-form",
+    onsubmit: (e) => {
+      e.preventDefault();
+      act(async () => {
+        await api(`/api/admin/sendings/${enc(s.id)}/reply`, { method: "POST", body: { reply: area.value.trim() } });
+        replyDrafts.delete(s.id);
+      }, `Hilsenen er lagret. ${who} ser den under «Mine filer».`);
+    },
+  },
+  h("label", { for: id }, `Hilsen til ${who}`),
+  area,
+  h("button", { type: "submit", class: "btn btn-secondary btn-small" }, s.reply ? "Oppdater hilsenen" : "Lagre hilsenen"));
+}
+
+function pickResult(file) {
+  resultTarget = file;
+  $("result-input").click();
+}
+
+$("result-input").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  const target = resultTarget;
+  e.target.value = "";
+  if (!file || !target) return;
+  toast(`Laster opp ${file.name} …`);
+  await act(() => upload(`/api/admin/files/${enc(target.id)}/result?name=${enc(file.name)}`, file, {
+    onProgress: (pct) => toast(`Laster opp ${file.name} … ${pct} %`),
+  }), "Oversettelsen er lastet opp og merket som ferdig.");
+});
+$("sendings-refresh").addEventListener("click", () => load());
 
 // ---------- Logg ----------
 
 function logUrl(beforeId) {
   const params = new URLSearchParams();
-  for (const [key, id] of [["level", "log-level"], ["type", "log-type"], ["userId", "log-user"], ["q", "log-q"]]) {
+  for (const [key, id] of [["level", "log-level"], ["source", "log-source"], ["type", "log-type"], ["q", "log-q"]]) {
     const value = $(id).value.trim();
     if (value) params.set(key, value);
   }
-  if (beforeId != null) params.set("beforeId", beforeId);
-  params.set("limit", PAGE);
+  if (beforeId) params.set("beforeId", beforeId);
+  params.set("limit", String(LOG_PAGE));
   return `/api/admin/events?${params}`;
 }
 
-function logRow(e, fresh) {
-  return h("tr", { class: `row-${e.level}${fresh ? " is-fresh" : ""}` },
-    h("td", { class: "nowrap" }, formatTs(e.ts)),
-    h("td", null, level(e.level)),
-    h("td", null, h("code", null, e.type)),
-    h("td", { class: "msg" }, e.message, dataDetails(e.data)),
-    h("td", null, e.username || userName(e.userId)),
-    h("td", null, e.jobId ? h("button", {
-      type: "button", class: "btn-link mono", title: "Åpne jobben", onclick: () => showJob(e.jobId),
-    }, e.jobId) : ""),
-    h("td", { class: "nowrap" }, e.ip || "")
+function eventData(ev) {
+  let data = ev.data ?? ev.dataJson ?? null;
+  if (typeof data === "string") {
+    try {
+      data = JSON.parse(data);
+    } catch {
+      // Ikke JSON: vis teksten som den er.
+    }
+  }
+  const extra = { ip: ev.ip, userId: ev.userId, sessionId: ev.sessionId, sendingId: ev.sendingId, fileId: ev.fileId, data };
+  const shown = Object.fromEntries(Object.entries(extra).filter(([, v]) => v != null && v !== ""));
+  return Object.keys(shown).length ? JSON.stringify(shown, null, 2) : "";
+}
+
+function eventRow(ev, isNew) {
+  const d = new Date(ev.ts);
+  const when = formatWhen(ev.ts);
+  const details = eventData(ev);
+  return h("li", { class: `ev ev-${ev.level}${isNew ? " appear" : ""}` },
+    h("div", { class: "ev-head" },
+      h("time", { dateTime: ev.ts, title: d.toLocaleString("nb-NO") }, `${when[0].toUpperCase()}${when.slice(1)}:${String(d.getSeconds()).padStart(2, "0")}`),
+      h("span", { class: `lvl lvl-${ev.level}` }, LEVELS[ev.level] || ev.level),
+      h("code", { class: "ev-type" }, ev.type),
+      h("span", { class: "muted" }, [SOURCES[ev.source] || ev.source, ev.username].filter(Boolean).join(" · "))),
+    ev.message ? h("p", { class: "ev-msg" }, ev.message) : null,
+    details ? h("details", null, h("summary", null, "Detaljer"), h("pre", null, details)) : null
   );
 }
 
-function showJob(id) {
-  selectTab("jobber");
-  openDrill(id);
+function renderLog() {
+  fill($("log"), log.events.length ? log.events.map((ev) => eventRow(ev, false)) : h("li", { class: "muted" }, "Ingen hendelser med disse filtrene."));
+  $("log-more").hidden = !log.more;
 }
 
-async function loadEvents() {
+async function loadLog() {
   const { events } = await api(logUrl());
-  logEvents = events;
-  $("log-table").tBodies[0].replaceChildren(...(events.length ? events.map((e) => logRow(e)) : [emptyRow(7, "Ingen hendelser passer filteret.")]));
-  $("log-more").hidden = events.length < PAGE;
+  log.events = events || [];
+  log.more = log.events.length === LOG_PAGE;
+  renderLog();
 }
 
-async function moreEvents() {
-  const last = logEvents[logEvents.length - 1];
-  if (!last) return;
-  const { events } = await api(logUrl(last.id));
-  logEvents.push(...events);
-  $("log-table").tBodies[0].append(...events.map((e) => logRow(e)));
-  $("log-more").hidden = events.length < PAGE;
-}
-
-async function refreshEvents() {
-  const top = logEvents[0];
+// Automatisk oppdatering legger bare nye hendelser øverst, så åpne detaljer og «Last flere» blir stående.
+async function mergeLog() {
+  if (!$("log-auto").checked) return;
   const { events } = await api(logUrl());
-  const fresh = top ? events.filter((e) => e.id > top.id) : events;
-  if (!fresh.length) return;
-  // Mange nye på en gang kan gi hull i listen; da laster vi den på nytt.
-  if (!top || fresh.length === events.length) return loadEvents();
-  logEvents.unshift(...fresh);
-  $("log-table").tBodies[0].prepend(...fresh.map((e) => logRow(e, true)));
+  const top = log.events.length ? log.events[0].id : 0;
+  const newer = (events || []).filter((ev) => ev.id > top);
+  if (!newer.length) return;
+  if (!log.events.length) return loadLog();
+  log.events = [...newer, ...log.events];
+  $("log").prepend(...newer.map((ev) => eventRow(ev, true)));
 }
 
-function syncLogTimer() {
-  clearInterval(logTimer);
-  if ($("log-auto").checked && activeTab === "logg" && !document.hidden) {
-    logTimer = setInterval(() => guarded("logg", refreshEvents), 5000);
+$("log-more").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  try {
+    const { events } = await api(logUrl(log.events[log.events.length - 1].id));
+    log.events.push(...(events || []));
+    log.more = (events || []).length === LOG_PAGE;
+    $("log").append(...(events || []).map((ev) => eventRow(ev, false)));
+    $("log-more").hidden = !log.more;
+  } catch (err) {
+    toast(err.message);
   }
-}
+  btn.disabled = false;
+});
 
-function setupLog() {
-  const typeSelect = $("log-type");
-  for (const [group, types] of Object.entries(EVENT_TYPES)) {
-    typeSelect.append(h("optgroup", { label: group }, types.map((t) => h("option", { value: t }, t))));
-  }
-  const reload = () => guarded("logg", loadEvents);
-  for (const id of ["log-level", "log-type", "log-user"]) $(id).addEventListener("change", reload);
-  $("log-q").addEventListener("input", () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(reload, 350);
-  });
-  $("log-filters").addEventListener("submit", (e) => {
-    e.preventDefault();
-    reload();
-  });
-  $("log-auto").addEventListener("change", syncLogTimer);
-  $("log-more").addEventListener("click", () => guarded("logg", moreEvents));
-  document.addEventListener("visibilitychange", syncLogTimer);
-}
+let filterTimer = 0;
+$("log-filters").addEventListener("submit", (e) => e.preventDefault());
+$("log-filters").addEventListener("input", (e) => {
+  if (e.target.id === "log-auto") return;
+  clearTimeout(filterTimer);
+  filterTimer = setTimeout(() => load(), e.target.tagName === "SELECT" ? 0 : 350);
+});
 
 // ---------- Økter ----------
 
 async function loadSessions() {
   const { sessions } = await api(`/api/admin/sessions?all=${$("sessions-all").checked ? 1 : 0}`);
-  $("sessions-table").tBodies[0].replaceChildren(
-    ...(sessions.length ? sessions.map(sessionRow) : [emptyRow(7, "Ingen aktive økter.")])
-  );
+  fill($("sessions"), (sessions || []).length ? sessions.map(sessionRow) : h("li", { class: "muted" }, "Ingen økter."));
 }
 
 function sessionRow(s) {
-  const ended = Boolean(s.revokedAt) || new Date(s.expiresAt) < Date.now();
-  const device = deviceLabel(s.userAgent);
-  return h("tr", { class: ended ? "muted" : "" },
-    h("td", null, h("strong", null, s.username || "–"), me && s.username === me.username ? h("span", { class: "tag" }, "deg") : null),
-    h("td", { title: s.userAgent || "" }, device),
-    h("td", { class: "nowrap" }, s.ip || "–"),
-    h("td", { class: "nowrap", title: formatTs(s.lastSeenAt) }, relativeTime(s.lastSeenAt)),
-    h("td", { class: "nowrap" }, formatTs(s.createdAt)),
-    h("td", { class: "nowrap" }, s.revokedAt ? `Logget ut ${relativeTime(s.revokedAt)}` : ended ? "Utløpt" : relativeTime(s.expiresAt)),
-    h("td", { class: "actions" }, ended ? "" : h("button", {
-      type: "button", class: "btn btn-secondary btn-small", onclick: () => revokeSession(s, device),
-    }, "Logg ut"))
+  const active = !s.revokedAt && Date.parse(s.expiresAt) > Date.now();
+  const id = s.idPrefix || s.id;
+  return h("li", { class: "item" },
+    h("div", { class: "item-main" },
+      h("p", null,
+        h("strong", null, s.displayName || s.username || `Bruker ${s.userId}`), " ",
+        s.current ? h("span", { class: "tag" }, "Denne økten") : null, " ",
+        pill(active ? "done" : "deleted", active ? "Aktiv" : "Avsluttet")),
+      h("p", { class: "muted small" }, `Innlogget ${formatWhen(s.createdAt)} · sist aktiv ${relativeTime(s.lastSeenAt)} · utløper ${formatWhen(s.expiresAt)}`),
+      h("p", { class: "muted small" }, [describeAgent(s.userAgent), s.ip ? `IP ${s.ip}` : ""].filter(Boolean).join(" · ")),
+      s.revokedAt ? h("p", { class: "small" }, `Avsluttet ${formatWhen(s.revokedAt)}${s.revokedReason ? `: ${s.revokedReason}` : ""}`) : null),
+    active
+      ? button("Logg ut", async () => {
+        if (s.current && !(await confirmDialog({ title: "Logge ut deg selv?", text: "Dette er økten du bruker nå.", confirm: "Logg ut" }))) return;
+        act(() => api(`/api/admin/sessions/${enc(id)}/revoke`, { method: "POST" }), "Økten er avsluttet.");
+      })
+      : null
   );
 }
 
-async function revokeSession(s, device) {
-  const ok = await confirmDialog({
-    title: "Logge ut økten?",
-    text: `${s.username || "Brukeren"} blir logget ut på ${device} og må logge inn på nytt der.`,
-    confirm: "Logg ut økten",
-    danger: true,
-  });
-  if (!ok) return;
-  await guarded("okter", async () => {
-    await api(`/api/admin/sessions/${enc(s.idPrefix)}/revoke`, { method: "POST" });
-    await loadSessions();
-  });
-}
+$("sessions-all").addEventListener("change", () => load());
 
 // ---------- Brukere ----------
 
-async function fetchUsers() {
-  ({ users } = await api("/api/admin/users"));
-  for (const id of ["jobs-user", "log-user"]) {
-    const select = $(id);
-    const current = select.value;
-    select.replaceChildren(select.options[0], ...users.map((u) => h("option", { value: String(u.id) }, u.username)));
-    select.value = current;
-  }
-}
-
 async function loadUsers() {
-  await fetchUsers();
-  $("users-table").tBodies[0].replaceChildren(...(users.length ? users.map(userRow) : [emptyRow(7, "Ingen brukere.")]));
+  const { users } = await api("/api/admin/users");
+  fill($("users"), (users || []).map(userRow));
 }
 
 function userRow(u) {
-  const self = Boolean(me && u.id === me.id);
-  const role = h("select", {
-    "aria-label": `Rolle for ${u.username}`,
-    disabled: self,
-    title: self ? "Du kan ikke endre din egen rolle" : null,
-    onchange: (e) => updateUser(u, { role: e.target.value }),
-  },
-  h("option", { value: "user", selected: u.role === "user" }, "Bruker"),
-  h("option", { value: "admin", selected: u.role === "admin" }, "Administrator"));
-  return h("tr", { class: u.disabled ? "muted" : "" },
-    h("td", null, h("strong", null, u.username), self ? h("span", { class: "tag" }, "deg") : null),
-    h("td", null, u.displayName || ""),
-    h("td", null, role),
-    h("td", null, u.disabled ? "Deaktivert" : u.mustChangePassword ? "Må lage nytt passord" : "Aktiv"),
-    h("td", { class: "nowrap" }, u.lastLoginAt ? relativeTime(u.lastLoginAt) : "Aldri"),
-    h("td", { class: "nowrap" }, formatTs(u.createdAt)),
-    h("td", { class: "actions" },
-      h("button", { type: "button", class: "btn btn-secondary btn-small", onclick: () => resetPassword(u) }, "Nytt passord"),
-      self ? null : h("button", {
-        type: "button", class: "btn btn-secondary btn-small", onclick: () => toggleDisabled(u),
-      }, u.disabled ? "Aktiver" : "Deaktiver")
-    )
+  const self = me && u.id === me.id;
+  const disabled = Boolean(u.disabled);
+  return h("li", { class: "item" },
+    h("div", { class: "item-main" },
+      h("p", null,
+        h("strong", null, u.displayName || u.username), " ", h("span", { class: "muted" }, u.username), " ",
+        u.role === "admin" ? h("span", { class: "tag" }, "Admin") : null, " ",
+        disabled ? pill("failed", "Deaktivert") : null, " ",
+        u.mustChangePassword ? h("span", { class: "tag" }, "Må lage passord") : null,
+        self ? h("span", { class: "tag" }, "Deg") : null),
+      h("p", { class: "muted small" }, `${u.lastLoginAt ? `Sist innlogget ${relativeTime(u.lastLoginAt)}` : "Har ikke logget inn ennå"} · opprettet ${formatWhen(u.createdAt)}`)),
+    h("div", { class: "item-actions" },
+      button("Nytt passord", () => resetPassword(u)),
+      button("Endre navn", () => rename(u)),
+      self ? null : button(disabled ? "Aktiver" : "Deaktiver", () => patchUser(u, { disabled: !disabled }, disabled ? "Brukeren er aktivert." : "Brukeren er deaktivert og logget ut.")),
+      self ? null : button(u.role === "admin" ? "Gjør til bruker" : "Gjør til admin", () => patchUser(u, { role: u.role === "admin" ? "user" : "admin" }, "Rollen er endret.")))
   );
 }
 
-async function updateUser(u, patch) {
-  await guarded("brukere", async () => {
-    try {
-      await api(`/api/admin/users/${enc(u.id)}`, { method: "PATCH", body: patch });
-    } finally {
-      await loadUsers();
-    }
-  });
+function patchUser(u, body, done) {
+  return act(() => api(`/api/admin/users/${enc(u.id)}`, { method: "PATCH", body }), done);
 }
 
-async function toggleDisabled(u) {
-  if (!u.disabled) {
-    const ok = await confirmDialog({
-      title: `Deaktivere ${u.username}?`,
-      text: "Brukeren blir logget ut og kan ikke logge inn før du aktiverer kontoen igjen. Dokumentene blir liggende.",
-      confirm: "Deaktiver",
-      danger: true,
-    });
-    if (!ok) return;
-  }
-  updateUser(u, { disabled: !u.disabled });
+function rename(u) {
+  const input = h("input", { type: "text", id: "rename-input", value: u.displayName || "", autocomplete: "off" });
+  const dialog = h("dialog", { class: "modal", "aria-labelledby": "rename-title" },
+    h("form", { method: "dialog", class: "modal-body" },
+      h("h2", { id: "rename-title" }, `Endre navn på ${u.username}`),
+      h("div", { class: "field" }, h("label", { for: "rename-input" }, "Visningsnavn"), input),
+      h("div", { class: "modal-actions" },
+        h("button", { type: "submit", value: "cancel", class: "btn btn-secondary" }, "Avbryt"),
+        h("button", { type: "submit", value: "ok", class: "btn btn-primary" }, "Lagre"))));
+  dialog.addEventListener("close", () => {
+    const name = input.value.trim();
+    dialog.remove();
+    if (dialog.returnValue === "ok" && name) patchUser(u, { displayName: name }, "Navnet er endret.");
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+  input.select();
+}
+
+function welcomeMessage(user, password, mustChange, reset) {
+  const lines = [
+    `Hei, ${user.displayName || user.username}!`,
+    "",
+    reset
+      ? "Her er et nytt passord til InnNorsk:"
+      : "Her er innloggingen din til InnNorsk, der du kan sende meg dokumenter som skal oversettes til norsk:",
+    "",
+    `Adresse: ${location.origin}/login`,
+    `Brukernavn: ${user.username}`,
+    `Passord: ${password}`,
+    "",
+  ];
+  if (mustChange) lines.push("Første gang du logger inn, blir du bedt om å lage ditt eget passord.", "");
+  lines.push(`Hilsen ${me ? me.displayName || me.username : ""}`.trim());
+  return lines.join("\n");
+}
+
+function showSecret(user, password, mustChange, reset) {
+  $("secret-title").textContent = reset ? `Nytt passord til ${user.displayName || user.username}` : `${user.displayName || user.username} er opprettet`;
+  $("secret-password").textContent = password;
+  $("secret-message").value = welcomeMessage(user, password, mustChange, reset);
+  $("secret-dialog").showModal();
+  $("copy-password").focus();
 }
 
 async function resetPassword(u) {
   const ok = await confirmDialog({
-    title: `Nytt passord til ${u.username}?`,
-    text: "Det gamle passordet slutter å virke, og brukeren blir logget ut overalt.",
+    title: `Lage nytt passord til ${u.displayName || u.username}?`,
+    text: "Det gamle passordet slutter å virke, og brukeren logges ut overalt. Du får se det nye passordet én gang.",
     confirm: "Lag nytt passord",
-    danger: true,
   });
   if (!ok) return;
-  await guarded("brukere", async () => {
-    const { password } = await api(`/api/admin/users/${enc(u.id)}/reset-password`, { method: "POST" });
-    showSecret("Nytt passord er laget", u.username, password, "Hei! Her er et nytt midlertidig passord til InnNorsk:");
-    await loadUsers();
-  });
-}
-
-function setupUserForm() {
-  const form = $("user-form");
-  const error = $("user-error");
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const username = $("new-username").value.trim();
-    error.hidden = true;
-    if (!username) {
-      error.textContent = "Skriv inn et brukernavn.";
-      error.hidden = false;
-      return;
-    }
-    const button = $("new-submit");
-    button.disabled = true;
-    try {
-      const { user, password } = await api("/api/admin/users", {
-        method: "POST",
-        body: { username, displayName: $("new-display").value.trim() || username, role: $("new-role").value },
-      });
-      form.reset();
-      showSecret("Brukeren er opprettet", user.username, password, "Hei! Her er innloggingen din til InnNorsk:");
-      await loadUsers();
-    } catch (err) {
-      error.textContent = err.message;
-      error.hidden = false;
-    } finally {
-      button.disabled = false;
-    }
-  });
-}
-
-// ---------- Passordvindu ----------
-
-function showSecret(title, username, password, greeting) {
-  $("secret-title").textContent = title;
-  $("secret-password").textContent = password;
-  $("secret-message").value = [
-    greeting,
-    `${location.origin}/login`,
-    "",
-    `Brukernavn: ${username}`,
-    `Midlertidig passord: ${password}`,
-    "",
-    "Du blir bedt om å lage ditt eget passord første gang du logger inn.",
-  ].join("\n");
-  $("copy-status").textContent = "";
-  $("secret-dialog").showModal();
-}
-
-async function copyFrom(el, text, label) {
-  const status = $("copy-status");
   try {
-    await navigator.clipboard.writeText(text);
-    status.textContent = `${label} er kopiert.`;
-  } catch {
-    if (el.select) el.select();
-    else {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      getSelection().removeAllRanges();
-      getSelection().addRange(range);
-    }
-    status.textContent = "Kunne ikke kopiere automatisk. Teksten er markert – trykk Ctrl+C (Cmd+C på Mac).";
+    const password = generatePassword();
+    await api(`/api/admin/users/${enc(u.id)}/password`, { method: "POST", body: { ...(await newSaltedProof(password)), mustChangePassword: true } });
+    showSecret(u, password, true, true);
+    load();
+  } catch (err) {
+    toast(err.message);
   }
 }
 
-function setupSecretDialog() {
-  const dialog = $("secret-dialog");
-  $("copy-password").addEventListener("click", () => copyFrom($("secret-password"), $("secret-password").textContent, "Passordet"));
-  $("copy-message").addEventListener("click", () => copyFrom($("secret-message"), $("secret-message").value, "Meldingen"));
-  $("secret-close").addEventListener("click", () => dialog.close());
-  // Passordet skal ikke bli liggende i siden etterpå.
-  dialog.addEventListener("close", () => {
-    $("secret-password").textContent = "";
-    $("secret-message").value = "";
-  });
-}
+$("user-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const error = $("nu-error");
+  const username = $("nu-username").value.trim();
+  const displayName = $("nu-name").value.trim() || username;
+  const mustChangePassword = $("nu-must").checked;
+  error.hidden = Boolean(username);
+  error.textContent = username ? "" : "Skriv inn et brukernavn.";
+  if (!username) return $("nu-username").focus();
+  const btn = $("nu-save");
+  btn.disabled = true;
+  btn.textContent = "Oppretter …";
+  try {
+    const password = generatePassword();
+    const salted = await newSaltedProof(password);
+    const { user } = await api("/api/admin/users", {
+      method: "POST",
+      body: { username, displayName, role: $("nu-role").value, mustChangePassword, ...salted },
+    });
+    e.target.reset();
+    showSecret(user || { username, displayName }, password, mustChangePassword, false);
+    load();
+  } catch (err) {
+    error.textContent = err.message;
+    error.hidden = false;
+  }
+  btn.disabled = false;
+  btn.textContent = "Opprett og lag passord";
+});
+
+$("copy-password").addEventListener("click", () => copy($("secret-password").textContent));
+$("copy-message").addEventListener("click", () => copy($("secret-message").value));
+$("secret-dialog").addEventListener("close", () => {
+  $("secret-password").textContent = "";
+  $("secret-message").value = "";
+});
 
 // ---------- Oppstart ----------
 
-async function init() {
-  $("btn-logout").addEventListener("click", logout);
-  $("btn-test-api").addEventListener("click", testApi);
-  $("jobs-user").addEventListener("change", () => guarded("jobber", loadJobs));
-  $("jobs-refresh").addEventListener("click", () => guarded("jobber", loadJobs));
-  $("sessions-all").addEventListener("change", () => guarded("okter", loadSessions));
-  $("sessions-refresh").addEventListener("click", () => guarded("okter", loadSessions));
-  setupTabs();
-  setupLog();
-  setupUserForm();
-  setupSecretDialog();
+$("btn-logout").addEventListener("click", logout);
 
-  try {
-    ({ user: me } = await api("/api/auth/me"));
-  } catch {
-    return;
-  }
-  if (me.role !== "admin") {
-    location.replace("/");
-    return;
-  }
-  try {
-    await fetchUsers();
-  } catch {
-    // Navn vises som #id til brukerlisten kan hentes.
-  }
-  selectTab(location.hash.slice(1));
-}
-
-init();
+api("/api/auth/me").then(({ user }) => {
+  me = user;
+}).catch(() => {}).finally(() => {
+  const wanted = location.hash.slice(1);
+  select(NAMES.includes(wanted) ? wanted : "oversikt");
+});

@@ -1,12 +1,12 @@
-// Hono-appen: sikkerhetshoder, oppstart, økt, CSRF, API-ruter, beskyttede sider og statiske filer.
+// Hono-appen: sikkerhetshoder, økt, CSRF, API-ruter, beskyttede sider og statiske filer.
 import { Hono } from "hono";
-import { ensureBootstrap, loadSession } from "./auth.js";
+import { loadSession } from "./auth.js";
 import { HttpError, reqCtx } from "./http.js";
 import { logEvent } from "./log.js";
 import authRoutes from "./routes/auth.js";
-import jobRoutes from "./routes/jobs.js";
-import documentRoutes from "./routes/documents.js";
+import sendingRoutes from "./routes/sendings.js";
 import adminRoutes from "./routes/admin.js";
+import agentRoutes from "./routes/agent.js";
 import clientLogRoutes from "./routes/clientlog.js";
 
 const CSP = [
@@ -20,9 +20,11 @@ const CSP = [
   "form-action 'self'",
 ].join("; ");
 
+const isAgentApi = (path) => path.startsWith("/api/agent/");
+
 const app = new Hono();
 
-// Gjelder alle svar, også statiske filer og feil.
+// Gjelder alle svar, også statiske filer, nedlastinger og feil.
 app.use("*", async (c, next) => {
   await next();
   const res = new Response(c.res.body, c.res);
@@ -41,34 +43,33 @@ app.onError(async (err, c) => {
     method: c.req.method,
     path: c.req.path,
     stack: String(err.stack || "").slice(0, 4000),
-  }, reqCtx(c));
+  }, isAgentApi(c.req.path) ? { source: "agent" } : reqCtx(c));
   return c.json({ error: "Noe gikk galt på serveren. Feilen er logget." }, 500);
 });
 
 app.get("/healthz", (c) => c.json({ ok: true }));
 
-// Oppstart og økt trengs bare for API og de beskyttede sidene, ikke for css/js/bilder.
+// Økten trengs bare for API-et (ikke agentens) og de beskyttede sidene, ikke for css/js/bilder.
 const withSession = async (c, next) => {
-  await ensureBootstrap(c.env);
-  await loadSession(c);
+  if (!isAgentApi(c.req.path)) await loadSession(c);
   await next();
 };
 app.use("/api/*", withSession);
 for (const page of ["/", "/login", "/admin"]) app.use(page, withSession);
 
-// Enkel CSRF-beskyttelse: nettlesere kan ikke sette egne hoder på tvers av domener uten CORS.
+// CSRF: nettlesere kan ikke sette egne hoder på tvers av domener uten CORS. Agenten bruker Bearer-nøkkel i stedet.
 app.use("/api/*", async (c, next) => {
-  if (!["GET", "HEAD"].includes(c.req.method) && c.req.header("X-InnNorsk") !== "1") {
+  if (!["GET", "HEAD"].includes(c.req.method) && !isAgentApi(c.req.path) && c.req.header("X-InnNorsk") !== "1") {
     return c.json({ error: "Forespørselen ble avvist av sikkerhetshensyn. Last inn siden på nytt." }, 403);
   }
   await next();
 });
 
 app.route("/api/auth", authRoutes);
-app.route("/api/jobs", jobRoutes);
-app.route("/api/documents", documentRoutes);
+app.route("/api/agent", agentRoutes);
 app.route("/api/admin", adminRoutes);
 app.route("/api/client-log", clientLogRoutes);
+app.route("/api", sendingRoutes);
 app.all("/api/*", (c) => c.json({ error: "Fant ikke dette API-et." }, 404));
 
 const asset = (c) => c.env.ASSETS.fetch(c.req.raw);
