@@ -1,7 +1,7 @@
 # Agent notes
 
-Primary instructions: [CLAUDE.md](CLAUDE.md)
+Primary instructions: [CLAUDE.md](CLAUDE.md).
 
-This repo is the full InnNorsk codebase: the cloud web app (`server/`, `web/`, deployed to Render via `render.yaml` + `Dockerfile`) and the Windows Electron app, sharing the translation core in `src/`. GitHub Pages (`docs/index.html`) is only the Windows download page.
+InnNorsk = Cloudflare Worker (`worker/`, D1, R2, Workflow that translates via the xAI API) + static UI (`web/`) + shared translation core (`src/`), plus the legacy Windows Electron app. Deploy: [docs/DEPLOY.md](docs/DEPLOY.md).
 
-Tests and agents must never call the real xAI API. Use `test/helpers/mock-grok.js` or `test/helpers/mock-xai-server.js`.
+The repo is public: never commit keys or passwords. Tests and agents must never call the real xAI API or APNs — use `test/helpers/mock-grok.js`, `test/helpers/mock-xai-server.js`, `test/helpers/mock-apns.js`.

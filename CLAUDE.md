@@ -1,134 +1,79 @@
-# InnNorsk — kontekst for Claude (Cloud / Code)
+# InnNorsk — kontekst for Claude (og andre kodeagenter)
 
-Dette er en **dokumentoversetter til norsk** via **xAI Grok** (`https://api.x.ai`).
+Dokumentoversetter til norsk (bokmål/nynorsk) med **xAI Grok**. Resultatet skal **se ut som originalen**.
 
-Repo: https://github.com/TidemannEsbjug/InnNorsk  
-To produkter, samme kjerne (`src/`):
+Repo: https://github.com/TidemannEsbjug/InnNorsk — **offentlig**. Aldri API-nøkler, passord eller tokens i koden.
 
-- **InnNorsk Sky** (hovedprodukt): webapp med innlogging. Express 5 + `node:sqlite`, Docker på Render.
-- **Windows-appen** (lokal, eldre): Electron.
+## Produkter
 
-Ikke commit API-nøkler. I skyen ligger nøkkelen bare i serverens miljø (`XAI_API_KEY`). I Windows-appen limer brukeren den inn selv.
+| | Hva | Hvor |
+|---|---|---|
+| **InnNorsk (sky)** — hovedprodukt | Nettside med innlogging. Svetlana laster opp filer, oversettelsen skjer automatisk, ferdige filer ligger under «Mine filer». Eieren ser logger, Grok-kall, tokens/kostnad og alle filer i admin. | **Cloudflare Workers Paid** ($5/mnd): Worker + D1 + R2 + Workflows |
+| Windows-appen (eldre, lokal) | Electron. Velg mappe, oversett lokalt med egen xAI-nøkkel. | GitHub Releases + Pages-nedlastingsside (`docs/index.html`) |
 
-**Tester og agenter kaller aldri det ekte xAI-API-et.** Bruk `test/helpers/mock-grok.js` (falsk `fetch`) eller `test/helpers/mock-xai-server.js` (falsk HTTP-server, pek `XAI_BASE_URL` dit).
-
-## Hva som er hostet hvor
-
-| Ting | Hvor |
-|---|---|
-| All kildekode | GitHub `main` (dette repoet) |
-| Skyappen | Render webtjeneste fra `render.yaml` + `Dockerfile`, disk `/data` (SQLite + filer). Se `docs/DEPLOY.md` |
-| Oversettelse i skyen | Serveren kaller `api.x.ai` med `XAI_API_KEY` fra miljøet |
-| Nedlastingsside | GitHub Pages: https://tidemannesbjug.github.io/InnNorsk/ (`docs/index.html`) |
-| Windows-bygg | GitHub Releases (`InnNorsk-Windows.zip`) |
-| Oversettelse i Windows-appen | Lokalt i Electron, kaller `api.x.ai` |
-
-Pages er **ikke** appen. Det er en statisk landingsside med nedlastingsknapp.
+Begge bruker samme kjerne i `src/`.
 
 ## Produktkrav (må holdes)
 
-1. Bruker laster opp dokumenter (filer eller hel mappe) i skyen, eller velger en mappe i Windows-appen.
-2. Trykk oversett → dokumentene kommer ut på **bokmål** (valg: nynorsk).
-3. Resultatet skal **se ut som originalen**: avsnitt, linjeskift, skrift, skriftstørrelse, fet/kursiv.
-4. Originaler endres ikke. Output i egen mappe / eget resultat.
-5. xAI-nøkkel: sky = server-env, aldri i nettleseren eller loggen. Windows = Innstillinger. Må ha chat/model-ACL, ikke bare voice (`api-key:endpoint:voice` gir 403).
-6. Modell: `grok-4.6` mot `https://api.x.ai/v1/responses`.
-7. Sky: innlogging, eieren ser logger/feil/Grok-kall, ærlige tidsestimat. Norsk UI.
-
-## Støttede formater
-
-| Inn | Ut | Hvordan |
-|---|---|---|
-| `.docx` | `.docx` | Tekst byttes på stedet i OOXML. Stiler/tema beholdes. |
-| `.pptx` | `.pptx` | Samme, i slide XML. |
-| `.xlsx` | `.xlsx` | Oversetter tekstceller, hopper over tall/formler. |
-| `.pdf` | `.docx` | pdf.js henter tekst + font/størrelse, bygger Word. |
-| `.txt` `.md` `.csv` `.html` | samme / `.html` | Tekst/HTML. |
-| `.rtf` | `.docx` | RTF strippes, skrives som Word. |
-
-Skannet PDF uten tekstlag kan ikke oversettes. All utdata sjekkes av `src/validate.js` før levering.
+1. Bruker laster opp dokumenter (filer eller mappe) → bokmål (valg: nynorsk).
+2. Resultatet beholder avsnitt, linjeskift, skrift, størrelse, fet/kursiv, tabeller. Originaler endres aldri.
+3. xAI-nøkkel kun som Worker-secret `XAI_API_KEY` (aldri i nettleser/logg). Må ha chat/model-ACL (`api-key:endpoint:voice` gir 403).
+4. Norsk UI overalt. Varmt, vennlig design.
+5. Eieren ser logger, feil, Grok-kall og estimat vs faktisk tid.
 
 ## Kodekart
 
 ```
-src/                 Delt kjerne (sky + Electron)
-  grok.js            xAI Responses API: batcher som JSON-array, retry, split, dryRun, telemetri-hooks
-  pipeline.js        translateBuffer/analyzeBuffer, HANDLERS/SUPPORTED, utdatanavn; scanFolder/translateFile (Electron)
-  validate.js        validateOutput: OOXML-zip + XML-gyldighet, UTF-8
-  xml-util.js        XML-escaping/hjelpere
-  formats/docx.js    Word: bytt tekst i lengste run, behold rPr
-  formats/pptx.js    PowerPoint: behold a:rPr
-  formats/pdf.js     PDF-layout → styled Word
-  formats/xlsx.js    Excel-celler
-  formats/text.js    txt/md/csv/html/rtf
-  formats/simple-docx.js  Bygg Word når vi ikke har original OOXML
-  main.js preload.js settings.js renderer/   Electron (nøkkel kryptert via safeStorage)
-server/              Skyserver
-  index.js           oppstart, admin-bootstrap, worker, ryddig nedstenging
-  app.js             createApp() → Express-app (testbar uten listen)
-  config.js db.js    env → config; node:sqlite + migreringer
-  auth.js            scrypt, økter, CSRF, innloggingssperre
-  log.js             hendelser → events-tabell + stdout-JSON
-  storage.js         filstier under DATA_DIR, opprydding
-  estimate.js        tidsestimat + kalibrering fra grok_calls
-  worker.js          jobbkø (én jobb om gangen), fremdrift, ETA, avbryt
-  routes/            auth, jobs, admin, client-log
-  cli.js             create-user | reset-password | list-users | disable-user
-web/                 Statisk UI (login/index/admin), vanilla JS, ingen byggesteg
-test/                node:test; helpers/mock-grok.js, helpers/mock-xai-server.js
-Dockerfile render.yaml .env.example   Drift (docs/DEPLOY.md)
-scripts/pack-win.js  Bygg Windows-zip fra macOS (uten Wine)
-docs/                Pages (index.html) + ARCHITECTURE, PRODUCT, DEPLOY
+src/                      Delt kjerne (CommonJS; bundles inn i Workeren, brukes av Electron)
+  core.js                 HANDLERS/SUPPORTED, collectStrings, analyzeBuffer, applyTranslations, translateBuffer, utfilnavn
+  grok.js                 xAI Responses API: planBatches, translateBatch (retry, split ved feil antall, GrokError), transport-hook
+  validate.js             sjekker at .docx/.pptx/.xlsx er gyldig XML før levering
+  formats/*.js            docx, pptx, xlsx, pdf (unpdf, ekte fontnavn), text (txt/md/csv/html/rtf), simple-docx
+  pipeline.js main.js preload.js settings.js renderer/   Electron (Windows-appen)
+worker/                   Cloudflare Worker (ESM, Hono)
+  index.js app.js         inngang, sikkerhetsheadere, sider, ruter; eksporterer Workflow TranslateSending
+  translate.js            Workflow: prepare → batch-trinn (4 batcher, R2-cache per batch) → assemble → finish
+  estimate.js xai.js      estimator (t = a + b·tegn, kalibrert fra grok_calls); xAI-oppsett, grok_calls, kostnad
+  sendings.js files.js    sendinger/filer, statustekster, stier, opplasting/nedlasting
+  auth.js                 PBKDF2-bevis fra klienten + SHA-256 på server, økter, sperre, CSRF
+  log.js cron.js apns.js  hendelser (D1 + konsoll-JSON), opprydding/avstemming, valgfri iPhone-push
+  routes/                 auth, sendings, admin, clientlog
+migrations/               D1: 0001_init.sql, 0002_cloud_translate.sql (endre aldri en migrasjon som er kjørt)
+web/                      Statisk UI (login, index, admin), vanilla JS, ingen byggesteg
+scripts/make-user.js      oppretter/endrer brukere lokalt → wrangler d1 execute (passordet forlater aldri maskinen)
+ios/                      valgfri SwiftUI-app for eierens push-varsler (ikke kompilert i CI)
+test/                     node:test; helpers/mock-grok.js, mock-xai-server.js, mock-apns.js, worker-dev.js
+docs/                     DEPLOY.md, ARCHITECTURE.md, PRODUCT.md, SPEC-v5-cloudflare.md; index.html = Pages
 ```
 
 ## Utvikling
 
 ```bash
-npm install                          # ELECTRON_SKIP_BINARY_DOWNLOAD=1 hvis du bare jobber med serveren
-npm test                             # alle tester, alltid mot mock
+npm install
+npm test                  # alt mot falsk xAI og falsk APNs (starter wrangler dev lokalt)
+cp .dev.vars.example .dev.vars   # fyll inn, eller pek XAI_BASE_URL mot mocken:
 node test/helpers/mock-xai-server.js 18080 &
-XAI_BASE_URL=http://127.0.0.1:18080 XAI_API_KEY=mock ADMIN_USERNAME=admin ADMIN_PASSWORD=lokalt-passord-123 npm run server
-# → http://localhost:8080, data i ./data/
-npm start                            # Electron
+npm run db:migrate:local && npm run dev
+npm run make-user -- svetlana --role user --local --apply
 ```
 
-Regel: nye tester skal bruke mocken. Ingen test, skript eller agent skal treffe ekte `api.x.ai` eller lete etter en ekte nøkkel.
+Deploy: se [docs/DEPLOY.md](docs/DEPLOY.md).
 
-Windows-zip (fra Mac):
+## Harde regler
 
-```bash
-node scripts/pack-win.js
-```
-
-Output: `dist/InnNorsk-Windows.zip`. Last opp som GitHub Release. Pages peker på `/releases/latest/download/InnNorsk-Windows.zip`. Skriptet pakker bare `src/`, `assets/` og prod-avhengigheter (uten `express`) i `app.asar`, ikke `server/`, `web/`, `test/` eller `data/`.
-
-Electron-packager `--win` på Mac krever Wine for ikon/metadata. `scripts/pack-win.js` laster ned win32 Electron og pakker `app.asar` i stedet.
-
-## Sky (implementert)
-
-Detaljer i `docs/ARCHITECTURE.md`. Kort:
-
-- **Flyt:** `POST /api/jobs` (utkast) → én rå `PUT` per fil → analyse uten nettverk (`dryRun`) gir tekstmengde og estimat → `start` → worker oversetter én jobb om gangen → nettleseren poller `GET /api/jobs/:id` → nedlasting per fil eller zip.
-- **Status:** jobb `draft → queued → running → done | partial | failed | cancelled`. Omstart under kjøring → jobben `failed`, køen fortsetter.
-- **Logging:** `log.<nivå>(type, melding, data, ctx)` → `events` + én JSON-linje på stdout. Hvert xAI-forsøk → `grok_calls`. Faste hendelsestyper (`auth.*`, `job.*`, `file.*`, `grok.*`, `download.*`, `client.error`, `server.error` …). Hemmeligheter fjernes fra `data`.
-- **Estimat:** `t = a + b·tegn` per batch (standard 8 s + 0,006 s/tegn), kalibrert fra de siste 300 kallene, LPT over `GROK_CONCURRENCY`, live ETA som korrigerer seg mot faktisk tid, sikkerhet lav/middels/høy.
-- **Sletting:** filer etter `RETENTION_DAYS` (14), utkast etter 2 døgn, hendelser etter 90 dager. Jobbrader og `grok_calls` beholdes.
-- **Sikkerhet:** scrypt, token-hash i DB, `HttpOnly`/`SameSite=Lax`-cookie, CSRF-header, streng CSP, bruker ser bare egne jobber.
+- **Tester, skript og agenter kaller aldri ekte xAI eller APNs.** Bruk mockene. Let aldri etter ekte nøkler.
+- Aldri hemmeligheter i repoet. `wrangler secret put` og `scripts/make-user.js`.
+- Norsk UI. CSP: ingen inline-skript, `on*`-attributter eller `style=""` i `web/`.
 
 ## Kjente feller
 
-- Voice-nøkkel (`acls: ["api-key:endpoint:voice"]`) → 403 på chat. Bruk nøkkel med `api-key:endpoint:*` og `api-key:model:*`.
-- xAI 403-body er `{ error: "string" }`, ikke `{ error: { message } }`.
-- Linjeskift i Word må være `<w:br/>`, ikke `\n` inne i `<w:t>`.
-- I DOCX: skriv oversettelsen inn i **lengste run**, ikke nødvendigvis første (første kan være 8pt/tom).
-- Ikke slå sammen avsnitt før Grok-kall; det ødelegger layout.
+- Voice-nøkkel → 403 på chat. xAI 403-body er `{ error: "string" }`.
+- Word: linjeskift er `<w:br/>`; skriv oversettelsen i **lengste run**; ikke slå sammen avsnitt før Grok-kall.
+- collect/apply krever at handleren er deterministisk: samme fil → samme kallrekkefølge og strenger.
+- Workflow: hvert batchsvar ligger i R2 (`work/<fil>/b-<idx>.json`) og hoppes over ved nye forsøk — ikke fjern det (ellers betales det dobbelt). Trinn-navn må være faste og unike.
+- Auth: klienten sender `proof = base64url(PBKDF2-SHA256(passord, salt, 310000, 32 B))`; serveren lagrer bare `sha256(proof)`. Ingen Unicode-normalisering.
+- Alle ikke-GET `/api/*` krever headeren `X-InnNorsk: 1`.
+- Opplasting er rå `PUT /api/sendings/:id/files?path=<encodeURIComponent>` med Content-Length. Maks 25 MB (Worker-minne 128 MB; filen analyseres i minnet).
+- Lokal `wrangler dev` kan ikke HTTP/2 til APNs → tester bruker `mock-apns.js`. Sandbox- vs produksjons-token må matche `APNS_ENV`/enhetens env.
+- `database_id` i `wrangler.jsonc` må fylles inn etter `wrangler d1 create innnorsk`.
 - Windows-appen er usignert → SmartScreen «Mer info → Kjør likevel».
-- `node:sqlite` krever Node ≥ 22.13 og gir `ExperimentalWarning`. Start med `--disable-warning=ExperimentalWarning` (npm-skriptene og Dockerfile gjør det).
-- Opplasting er rå `PUT /api/jobs/:id/files?path=<encodeURIComponent(relPath)>`, én fil per kall. Ingen multipart/multer.
-- Alle `/api/*`-kall som ikke er GET/HEAD, må ha headeren `X-InnNorsk: 1`, ellers 403. Husk den i curl og tester.
-- CSP tillater ikke inline-skript eller `on*`-attributter i `web/`. Bruk egne `.js`-filer og `addEventListener`.
-- Nøyaktig én instans: SQLite + jobbkø i minnet. Ikke skaler horisontalt.
-- `Secure`-cookie i produksjon krever HTTPS (localhost går).
-- `ADMIN_USERNAME`/`ADMIN_PASSWORD` brukes bare når `users` er tom.
-- pdfjs-dist sin valgfrie `canvas` installeres ikke (Docker og pack-win bruker `--omit=optional`). Advarslene «Cannot polyfill DOMMatrix/Path2D» ved oppstart er ufarlige; tekstuttrekk trenger ikke canvas.
-- Claude Code i skyen: miljøets nettverkspolicy blokkerer `api.x.ai` (proxyen svarer 403 på CONNECT) og `render.com`. Det er med vilje for tester. Skal en økt nå xAI, må eieren legge `api.x.ai` til under **Network access** i miljøets innstillinger (miljømenyen i øktens tittellinje → Edit), eller velge et bredere tilgangsnivå.
