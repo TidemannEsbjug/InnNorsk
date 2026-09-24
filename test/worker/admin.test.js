@@ -202,3 +202,43 @@ test("brukere: opprett med bevis fra nettleseren, endre, deaktiver og nytt passo
   assert.ok(users.every((u) => !("verifier" in u) && !("salt" in u)));
   assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type IN ('user.created', 'user.updated', 'user.password_reset')"))[0].n, 3);
 });
+
+test("enheter: ny registrering av samme token (ny eier, nytt miljø) slår den på igjen og fjerner gammel feil", async () => {
+  const token = "f6".repeat(32);
+  await admin.post("/api/admin/devices", { token, env: "sandbox", name: "Gammel iPhone" });
+  dev.apns.failToken(token, 410);
+  await admin.post("/api/admin/test-push");
+  const [gone] = await dev.sql("SELECT disabled_at, last_error FROM devices WHERE token = ?", token);
+  assert.ok(gone.disabled_at, "Unregistered slår av enheten");
+  assert.equal(gone.last_error, "Unregistered");
+
+  // Telefonen går videre til en annen admin og registrerer seg på nytt fra appen.
+  const created = await admin.post("/api/admin/users", {
+    username: "reserve", displayName: "Reserve", role: "admin", ...newSecret("reserve-pass-123"), mustChangePassword: false,
+  });
+  assert.equal(created.status, 201);
+  const other = await dev.login("reserve", { password: "reserve-pass-123" });
+  const again = await other.post("/api/admin/devices", { token: token.toUpperCase(), env: "production", name: "Ny iPhone" }, { headers: { "X-InnNorsk-Client": "ios" } });
+  assert.equal(again.status, 200);
+  assert.deepEqual(
+    { env: again.data.device.env, name: again.data.device.name, username: again.data.device.username, disabledAt: again.data.device.disabledAt, lastError: again.data.device.lastError },
+    { env: "production", name: "Ny iPhone", username: "reserve", disabledAt: null, lastError: null }
+  );
+  const [row] = await dev.sql("SELECT user_id, env, name, disabled_at, last_error FROM devices WHERE token = ?", token);
+  assert.equal(row.user_id, created.data.user.id);
+  assert.deepEqual([row.env, row.name, row.disabled_at, row.last_error], ["production", "Ny iPhone", null, null]);
+  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM devices WHERE token = ?", token))[0].n, 1, "ingen duplikat");
+
+  // Nå får den nye eieren testvarselet, ikke den gamle.
+  dev.apns.reset();
+  assert.deepEqual((await other.post("/api/admin/test-push")).data, { sent: 1, failed: 0, errors: [] });
+  assert.deepEqual(dev.apns.pushes.map((p) => p.token), [token]);
+  assert.ok(!(await admin.post("/api/admin/test-push")).data.errors.some((e) => e.startsWith("Ny iPhone")));
+
+  // Fjerning fra appen (DELETE /api/admin/devices/:token, også med store bokstaver).
+  const removed = await other.del(`/api/admin/devices/${token.toUpperCase()}`, { headers: { "X-InnNorsk-Client": "ios" } });
+  assert.equal(removed.status, 204);
+  assert.deepEqual(await dev.sql("SELECT token FROM devices WHERE token = ?", token), []);
+  const [event] = await dev.sql("SELECT source, user_id FROM events WHERE type = 'device.deleted' ORDER BY id DESC LIMIT 1");
+  assert.deepEqual([event.source, event.user_id], ["ios", created.data.user.id]);
+});

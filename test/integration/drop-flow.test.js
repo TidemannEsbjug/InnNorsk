@@ -203,7 +203,7 @@ test("Jonas ser hele forløpet i loggen: nettside, Mac og push", async () => {
   const [claimed] = await events("file.claimed", (e) => e.fileId === ids.docx);
   assert.equal(claimed.message, `Mac-en begynner på ${DOCX}`);
   const [translated] = await events("file.translated", (e) => e.fileId === ids.docx);
-  assert.equal(translated.data.costUsd, Number((3 * FAKE_COST_PER_CALL).toFixed(6)));
+  assert.ok(Math.abs(translated.data.costUsd - 3 * FAKE_COST_PER_CALL) < 1e-9, "kostnaden står i Mac-ens logglinje");
   assert.equal(translated.data.outputName, "Søknad æøå (norsk).docx");
   const [download] = await events("download.result", (e) => e.fileId === ids.docx);
   assert.equal(download.message, "Søknad æøå (norsk).docx lastet ned");

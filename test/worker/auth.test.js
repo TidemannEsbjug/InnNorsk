@@ -96,6 +96,24 @@ test("innlogging med riktig bevis gir økt; kapselen er HttpOnly/SameSite=Lax ut
   assert.deepEqual(me.data.limits, { maxFileMb: 50, maxFilesPerSending: 50 });
 });
 
+test("innlogging og utlogging fra iPhone-appen (X-InnNorsk-Client: ios) logges med kilde ios, nettleseren med web", async () => {
+  const sourceOf = async (type, sessionId) =>
+    (await dev.sql("SELECT source FROM events WHERE type = ? AND session_id = ? ORDER BY id DESC LIMIT 1", type, sessionId))[0].source;
+  for (const [headers, source] of [[{ "X-InnNorsk-Client": "ios" }, "ios"], [{}, "web"]]) {
+    const client = new Client(dev.url, { ip: freshIp() });
+    const { data } = await client.post("/api/auth/salt", { username: "eier" }, { headers });
+    const proof = proofFor(dev.users.eier.password, data.salt, data.iterations);
+    assert.equal((await client.post("/api/auth/login", { username: "eier", proof }, { headers })).status, 200);
+    const sessionId = crypto.createHash("sha256").update(client.cookie.split("=")[1]).digest("hex").slice(0, 8);
+    assert.equal(await sourceOf("auth.login", sessionId), source);
+    assert.equal((await client.post("/api/auth/logout", undefined, { headers })).status, 204);
+    assert.equal(await sourceOf("auth.logout", sessionId), source);
+  }
+  const failed = await new Client(dev.url, { ip: freshIp() }).post("/api/auth/login", { username: "eier", proof: "A".repeat(43) }, { headers: { "X-InnNorsk-Client": "ios" } });
+  assert.equal(failed.status, 401);
+  assert.equal((await dev.sql("SELECT source FROM events WHERE type = 'auth.login_failed' ORDER BY id DESC LIMIT 1"))[0].source, "ios");
+});
+
 test("feil passord og ukjent bruker gir samme norske melding", async () => {
   const anon = new Client(dev.url, { ip: freshIp() });
   const wrong = await anon.login("svetlana", "feil-passord-000");
