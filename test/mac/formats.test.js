@@ -42,7 +42,7 @@ test("docx, xlsx og pdf blir gyldige norske filer, på nettstedet og lokalt", as
   const pdf = api.addFile({ name: "Vær.pdf", body: minimalPdf() });
   assert.equal(await agent.run({ once: true }), 0);
   for (const f of [docx, xlsx, pdf]) assert.equal(f.status, "done", f.name);
-  assert.equal(pdf.outputName, "Vær.docx");
+  assert.deepEqual([docx.outputName, xlsx.outputName, pdf.outputName], ["Brev (norsk).docx", "Budsjett (norsk).xlsx", "Vær (norsk).docx"]);
 
   const folder = path.join(m.home, "InnNorsk", `${localDate()} Svetlana`);
   const local = (name) => {

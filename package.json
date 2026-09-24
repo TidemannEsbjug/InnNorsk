@@ -13,8 +13,10 @@
     "deploy": "wrangler d1 migrations apply innnorsk --remote && wrangler deploy",
     "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\"",
     "e2e": "node test/e2e/e2e.js",
-    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site|worker|web|test|migrations|wrangler.jsonc|\\.wrangler|\\.dev\\.vars\"",
-    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site|worker|web|test|migrations|wrangler.jsonc|\\.wrangler|\\.dev\\.vars\""
+    "make-user": "node scripts/make-user.js",
+    "mottak": "node mac/innnorsk-mottak.js",
+    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"^/(dist|docs|packaging|site|worker|web|test|migrations|mac|ios)(/|$)|^/scripts/make-user\\.js$|^/wrangler\\.jsonc$|^/\\.wrangler(/|$)|^/\\.dev\\.vars\"",
+    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"^/(dist|docs|packaging|site|worker|web|test|migrations|mac|ios)(/|$)|^/scripts/make-user\\.js$|^/wrangler\\.jsonc$|^/\\.wrangler(/|$)|^/\\.dev\\.vars\""
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.1",

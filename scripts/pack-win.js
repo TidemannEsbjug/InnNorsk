@@ -1,5 +1,6 @@
 // Bygger Windows-appen fra macOS/Linux uten Wine: win32-Electron + app.asar med src/, assets/ og prod-avhengigheter.
-// Skyappen (worker/, web/, migrations/, wrangler.jsonc) og test/ blir ikke med.
+// Fildroppen (worker/, web/, migrations/, wrangler.jsonc), Mac-mottaket (mac/), iPhone-appen (ios/),
+// scripts/ og test/ blir ikke med.
 //   node scripts/pack-win.js  →  dist/InnNorsk-Windows.zip
 const path = require("path");
 const fs = require("fs");
@@ -14,7 +15,7 @@ const version = require(path.join(root, "node_modules", "electron", "package.jso
 const COPY = ["package-lock.json", "src", "LICENSE"];
 const WORKER_ONLY_DEPS = ["hono"];
 const REQUIRED = ["src/main.js", "src/core.js", "src/validate.js", "src/grok.js", "node_modules/unpdf", "node_modules/jszip"];
-const FORBIDDEN = ["worker", "web", "test", "migrations", "wrangler.jsonc", "node_modules/hono"];
+const FORBIDDEN = ["worker", "web", "mac", "ios", "scripts", "test", "migrations", "wrangler.jsonc", ".dev.vars", "node_modules/hono"];
 
 function stageApp(stage) {
   for (const name of COPY) {

@@ -190,7 +190,8 @@ function createAgent({ config, token, paths, write = (line) => process.stdout.wr
       status.grokOk = true;
 
       if (copy) keepLocal(norskName(copy, result.outExt), result.buffer, ids);
-      const outputName = path.posix.basename(core.outputNameFor(relPath.replace(/\\/g, "/")));
+      // Svetlana får samme navn som den lokale kopien: «Rapport (norsk).docx», «Brev (norsk).docx» for Brev.pdf.
+      const outputName = norskName(path.posix.basename(relPath.replace(/\\/g, "/")), result.outExt);
       await retrying("Opplasting", () => api.result(file.id, { name: outputName, costUsd, buffer: result.buffer }));
 
       grokFailures.delete(file.id);

@@ -32,7 +32,7 @@ test("fil går sendt → under arbeid → ferdig, med fremdrift, estimat, kostna
 
   assert.equal(await agent.run({ once: true }), 0);
   assert.deepEqual(file.history, ["sent", "working", "done"]);
-  assert.equal(file.outputName, "Rapport.docx");
+  assert.equal(file.outputName, "Rapport (norsk).docx", "samme navn som den lokale kopien");
   const xml = await docXml(file.result);
   assert.match(xml, /NB:PARAGRAPH NUMBER 59 ABOUT BERGEN/);
   assert.match(xml, /<w:b\/>/, "formateringen er beholdt");
