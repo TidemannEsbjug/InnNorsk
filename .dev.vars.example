@@ -1,0 +1,13 @@
+# Lokale hemmeligheter for `npm run dev` (wrangler dev). Kopier til .dev.vars og fyll inn.
+# .dev.vars er i .gitignore og skal aldri committes. Skriv aldri ekte verdier i denne filen.
+
+# xAI-nøkkel fra https://console.x.ai (må ha api-key:endpoint:* og api-key:model:*, ikke bare voice).
+# La stå tom og sett XAI_BASE_URL til mock-serveren for å utvikle uten ekte nøkkel.
+XAI_API_KEY=
+
+# Første administrator og Svetlana opprettes fra disse ved første forespørsel (endres aldri etterpå).
+ADMIN_PASSWORD=
+SEED_USER_PASSWORD=
+
+# Valgfritt: pek mot den falske xAI-serveren (node test/helpers/mock-xai-server.js 18080 slow 300).
+# XAI_BASE_URL=http://127.0.0.1:18080

@@ -1,4 +1,27 @@
-// Felles hjelpere for alle sidene: API-kall, trygg DOM-bygging og norsk formatering.
+// Felles hjelpere for alle sidene: API-kall, opplasting, trygg DOM-bygging og norsk formatering.
+
+const OFFLINE = "Fikk ikke kontakt med serveren. Sjekk internettforbindelsen og prøv igjen.";
+
+function failure(status, data) {
+  const err = new Error((data && data.error) || `Noe gikk galt på serveren (feilkode ${status}). Prøv igjen om litt.`);
+  err.status = status;
+  return err;
+}
+
+function parse(text) {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+// På innloggingssiden er 401 et vanlig svar, ikke et tegn på utløpt økt.
+function toLogin(status) {
+  if (status !== 401 || location.pathname === "/login") return false;
+  location.href = "/login";
+  return true;
+}
 
 export async function api(path, { method = "GET", body } = {}) {
   const headers = { "X-InnNorsk": "1" };
@@ -12,28 +35,42 @@ export async function api(path, { method = "GET", body } = {}) {
       credentials: "same-origin",
     });
   } catch {
-    throw new Error("Fikk ikke kontakt med serveren. Sjekk internettforbindelsen og prøv igjen.");
-  }
-  // På innloggingssiden er 401 et vanlig svar, ikke et tegn på utløpt økt.
-  if (res.status === 401 && location.pathname !== "/login") {
-    location.href = "/login";
-    throw new Error("Du er logget ut. Logg inn på nytt.");
-  }
-  const text = await res.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
-  if (!res.ok) {
-    const err = new Error(
-      (data && data.error) || `Noe gikk galt på serveren (feilkode ${res.status}). Prøv igjen om litt.`
-    );
-    err.status = res.status;
+    const err = new Error(OFFLINE);
+    err.status = 0;
     throw err;
   }
+  if (toLogin(res.status)) throw failure(401, { error: "Du er logget ut. Logg inn på nytt." });
+  const data = parse(await res.text());
+  if (!res.ok) throw failure(res.status, data);
   return data;
+}
+
+// Rå filopplasting med fremdrift (fetch kan ikke rapportere opplastingsfremdrift).
+export function upload(url, blob, { onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const abort = () => xhr.abort();
+    xhr.open("PUT", url);
+    xhr.setRequestHeader("X-InnNorsk", "1");
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    });
+    xhr.addEventListener("load", () => {
+      if (signal) signal.removeEventListener("abort", abort);
+      if (toLogin(xhr.status)) return;
+      const data = parse(xhr.responseText);
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(failure(xhr.status, data));
+    });
+    xhr.addEventListener("error", () => reject(Object.assign(new Error("Opplastingen ble brutt. Sjekk internettforbindelsen og prøv igjen."), { status: 0 })));
+    xhr.addEventListener("abort", () => reject(new DOMException("Avbrutt", "AbortError")));
+    if (signal) {
+      if (signal.aborted) return xhr.abort();
+      signal.addEventListener("abort", abort);
+    }
+    xhr.send(blob);
+  });
 }
 
 // Lager et element. Strenger blir tekstnoder, så innhold fra serveren blir aldri tolket som HTML.
@@ -50,7 +87,7 @@ export function h(tag, props, ...children) {
   return node;
 }
 
-// Som replaceChildren, men hopper over null/false (replaceChildren ville skrevet «null»).
+// Som replaceChildren, men hopper over null/false.
 export function fill(node, ...children) {
   node.replaceChildren();
   append(node, children);
@@ -76,7 +113,11 @@ export function formatNumber(n) {
   return Number(n || 0).toLocaleString("nb-NO");
 }
 
-// Omtrentlig varighet for estimater: "under 1 min", "ca. 12 min", "ca. 1 t 5 min".
+export function plural(n, one, many) {
+  return `${formatNumber(n)} ${n === 1 ? one : many}`;
+}
+
+// Omtrentlig varighet: "under 1 min", "ca. 12 min", "ca. 1 t 5 min".
 export function formatDuration(seconds) {
   if (seconds == null || !Number.isFinite(Number(seconds))) return "–";
   if (seconds < 60) return "under 1 min";
@@ -93,19 +134,22 @@ export function formatClock(iso) {
   return Number.isNaN(d.getTime()) ? "" : `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-export function formatDateTime(iso) {
+export function startOfDay(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+// "I dag", "I går" eller "12. september" (med år hvis det ikke er i år).
+export function formatDay(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "";
   const days = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
-  const day =
-    days === 0 ? "i dag"
-      : days === 1 ? "i går"
-        : d.toLocaleDateString("nb-NO", { day: "numeric", month: "short", year: days > 300 ? "numeric" : undefined });
-  return `${day} kl. ${formatClock(d)}`;
-}
-
-function startOfDay(d) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  if (days === 0) return "I dag";
+  if (days === 1) return "I går";
+  return d.toLocaleDateString("nb-NO", {
+    day: "numeric",
+    month: "long",
+    year: d.getFullYear() === new Date().getFullYear() ? undefined : "numeric",
+  });
 }
 
 export function formatBytes(n) {
@@ -121,15 +165,16 @@ export function formatBytes(n) {
   return `${value.toLocaleString("nb-NO", { maximumFractionDigits: value < 10 ? 1 : 0 })} ${units[unit]}`;
 }
 
-// "akkurat nå", "for 3 min siden", "om 2 dager".
-export function relativeTime(iso) {
-  const t = new Date(iso).getTime();
+// "akkurat nå", "for 5 sekunder siden", "for 3 min siden", "om 2 dager".
+export function relativeTime(value) {
+  const t = new Date(value).getTime();
   if (Number.isNaN(t)) return "";
   const diff = (Date.now() - t) / 1000;
   const abs = Math.abs(diff);
-  if (abs < 45) return "akkurat nå";
+  if (abs < 5) return "akkurat nå";
   let text;
-  if (abs < 90 * 60) text = `${Math.round(abs / 60)} min`;
+  if (abs < 60) text = `${Math.floor(abs)} sekunder`;
+  else if (abs < 90 * 60) text = `${Math.round(abs / 60)} min`;
   else if (abs < 36 * 3600) text = `${Math.round(abs / 3600)} t`;
   else {
     const days = Math.round(abs / 86400);
@@ -140,7 +185,7 @@ export function relativeTime(iso) {
 
 const STATUS_LABELS = {
   draft: "Ikke startet",
-  queued: "I kø",
+  queued: "Venter på tur",
   running: "Oversetter",
   done: "Ferdig",
   partial: "Delvis ferdig",
@@ -148,7 +193,6 @@ const STATUS_LABELS = {
   cancelled: "Avbrutt",
   ready: "Klar",
   working: "Oversetter",
-  skipped: "Hoppet over",
 };
 
 export function statusLabel(status) {
@@ -156,6 +200,60 @@ export function statusLabel(status) {
 }
 
 export const LANGUAGE_LABELS = { bokmal: "Bokmål", nynorsk: "Nynorsk" };
+
+export function remember(key, value) {
+  try {
+    if (value == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    // Privat modus eller blokkert lagring: siden virker fortsatt, bare uten å huske.
+  }
+}
+
+export function recall(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+// Vennlig bekreftelse i stedet for nettleserens confirm(). Gir true når brukeren sier ja.
+export function confirmDialog({ title, text, confirm = "Ja", cancel = "Avbryt", danger = false }) {
+  return new Promise((resolve) => {
+    const cancelButton = h("button", { type: "submit", value: "cancel", class: "btn btn-secondary" }, cancel);
+    const dialog = h("dialog", { class: "modal", "aria-labelledby": "confirm-title" },
+      h("form", { method: "dialog", class: "modal-body" },
+        h("h2", { id: "confirm-title" }, title),
+        text ? h("p", null, text) : null,
+        h("div", { class: "modal-actions" },
+          cancelButton,
+          h("button", { type: "submit", value: "ok", class: `btn ${danger ? "btn-danger" : "btn-primary"}` }, confirm)
+        )
+      )
+    );
+    dialog.addEventListener("close", () => {
+      resolve(dialog.returnValue === "ok");
+      dialog.remove();
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    cancelButton.focus();
+  });
+}
+
+// Kort beskjed nederst på skjermen som forsvinner av seg selv.
+export function toast(message) {
+  let box = document.getElementById("toast");
+  if (!box) {
+    box = h("div", { id: "toast", class: "toast", role: "status" });
+    document.body.append(box);
+  }
+  box.textContent = message;
+  box.classList.add("show");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => box.classList.remove("show"), 4000);
+}
 
 export async function logout() {
   try {
@@ -182,6 +280,7 @@ export function reportErrors() {
         message: String(message || "Ukjent feil").slice(0, 500),
         stack: stack ? String(stack).slice(0, 4000) : undefined,
         url: location.pathname + location.hash,
+        context: { userAgent: navigator.userAgent },
       }),
       credentials: "same-origin",
       keepalive: true,

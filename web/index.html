@@ -3,128 +3,235 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>InnNorsk – oversett dokumenter til norsk</title>
+  <meta name="theme-color" content="#f8f4ed" />
+  <title>InnNorsk</title>
+  <link rel="icon" type="image/svg+xml" href="/img/icon.svg" />
   <link rel="icon" type="image/png" href="/img/icon.png" />
+  <link rel="apple-touch-icon" href="/img/icon.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Fraunces:opsz,wght,SOFT@9..144,500..650,50&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/css/app.css" />
   <script type="module" src="/js/app.js"></script>
 </head>
 <body>
-  <div class="blotter">
-    <header class="topbar">
-      <a class="brand" href="/">
-        <span class="mark" aria-hidden="true"><span class="mark-tray"></span></span>
-        <span>
-          <span class="eyebrow">Dokumentoversetter</span>
-          <span class="wordmark">InnNorsk</span>
-        </span>
+  <a class="skip-link" href="#main">Hopp til innholdet</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="logo" href="/">
+        <img src="/img/icon.svg" alt="" width="36" height="36" />
+        <span>InnNorsk</span>
       </a>
-      <nav class="top-actions" aria-label="Konto">
-        <span class="who" id="who"></span>
-        <a class="ghost" id="admin-link" href="/admin" hidden>Admin</a>
-        <button type="button" class="ghost" id="btn-password">Bytt passord</button>
-        <button type="button" class="ghost" id="btn-logout">Logg ut</button>
+      <nav class="nav" aria-label="Meny">
+        <a href="#mine">Mine dokumenter</a>
+        <button type="button" id="btn-password">Bytt passord</button>
+        <a href="/admin" id="admin-link" hidden>Admin</a>
+        <button type="button" id="btn-logout">Logg ut</button>
       </nav>
-    </header>
+    </div>
+  </header>
 
-    <main class="desk">
-      <section class="tray inn" aria-labelledby="inn-lip">
-        <h2 class="tray-lip" id="inn-lip">Inn-kurv</h2>
-        <div class="tray-body">
-          <p class="tray-kicker">Dokumentene du vil oversette</p>
-
-          <label class="lang" for="lang">
-            <span>Oversett til</span>
-            <select id="lang">
-              <option value="bokmal">Bokmål</option>
-              <option value="nynorsk">Nynorsk</option>
-            </select>
-          </label>
-          <p class="small-note" id="lang-note" hidden>Språket gjelder hele denne runden. Vil du bytte, trykk «Begynn på nytt».</p>
-
-          <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-describedby="drop-help">
-            <span class="drop-icon" aria-hidden="true"></span>
-            <span class="drop-title">Slipp filer eller en hel mappe her</span>
-            <span class="drop-sub" id="drop-help">Word, PDF, PowerPoint, Excel og tekstfiler. Originalene dine endres ikke.</span>
-          </div>
-
-          <div class="row pickers">
-            <button type="button" class="paper big" id="btn-files">Velg filer</button>
-            <button type="button" class="paper big quiet" id="btn-folder">Velg mappe</button>
-          </div>
-          <input type="file" id="input-files" multiple hidden
-                 accept=".docx,.pptx,.xlsx,.pdf,.txt,.md,.csv,.html,.htm,.rtf" />
-          <input type="file" id="input-folder" multiple hidden webkitdirectory />
-
-          <div class="notice" id="skipped" role="status" hidden></div>
-
-          <ul class="docs" id="in-list"></ul>
-
-          <button type="button" class="link-button" id="btn-restart" hidden>Begynn på nytt</button>
-        </div>
-      </section>
-
-      <section class="press" aria-label="Oversettelse">
-        <div class="slip" id="slip">
-          <p class="slip-label" id="slip-label">Estimert tid</p>
-          <p class="slip-value" id="slip-value">–</p>
-          <progress id="overall" max="100" value="0" hidden aria-label="Fremdrift totalt"></progress>
-          <p class="slip-line" id="slip-line" aria-live="polite"></p>
-          <p class="slip-note" id="slip-note"></p>
-        </div>
-
-        <button type="button" class="stamp" id="btn-start" disabled>
-          <span class="stamp-pad">Oversett til norsk</span>
-          <span class="stamp-sub" id="stamp-sub">Legg inn filer først</span>
-        </button>
-        <button type="button" class="cancel" id="btn-cancel" hidden>Avbryt</button>
-        <button type="button" class="paper big" id="btn-new" hidden>Ny oversettelse</button>
-
-        <div class="alert" id="alert" role="alert" hidden></div>
-      </section>
-
-      <section class="tray ut" aria-labelledby="ut-lip">
-        <h2 class="tray-lip" id="ut-lip">Ut-kurv</h2>
-        <div class="tray-body">
-          <p class="tray-kicker">Ferdig oversatt</p>
-          <p class="path" id="ut-title">Ingenting her ennå</p>
-          <a class="paper big zip" id="zip-link" href="#" download="" hidden>Last ned alle (.zip)</a>
-          <ul class="docs" id="out-list"></ul>
-          <p class="small-note" id="ut-note"></p>
-        </div>
-      </section>
-    </main>
-
-    <section class="history" aria-labelledby="history-title">
-      <h2 id="history-title">Tidligere oversettelser</h2>
-      <ul class="history-list" id="history-list">
-        <li class="empty">Henter …</li>
-      </ul>
+  <main class="column" id="main">
+    <section class="hero">
+      <h1 id="hello">Hei!</h1>
+      <p class="lead">Her oversetter du dokumenter til norsk. Avsnitt, skrift og oppsett blir som i originalen.</p>
     </section>
-  </div>
+
+    <div class="banner" id="welcome" role="status" hidden>
+      <svg class="banner-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5l2.3 5.1 5.5.5-4.2 3.7 1.3 5.5L12 15.4l-4.9 2.9 1.3-5.5-4.2-3.7 5.5-.5z" fill="currentColor" /></svg>
+      <p><strong>Velkommen tilbake!</strong> <span id="welcome-text"></span></p>
+      <a class="btn btn-small btn-secondary" href="#mine" id="welcome-go">Se dokumentene</a>
+      <button type="button" class="icon-btn" id="welcome-close" aria-label="Lukk meldingen">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+      </button>
+    </div>
+
+    <div class="notice notice-error" id="alert" role="alert" hidden></div>
+
+    <!-- Tre steg: legg til, velg språk, oversett -->
+    <div id="setup" class="steps">
+      <section class="card step" aria-labelledby="step1-title">
+        <div class="step-head">
+          <span class="step-num" id="step1-num" aria-hidden="true">1</span>
+          <h2 id="step1-title">Legg til dokumenter</h2>
+        </div>
+
+        <div class="dropzone" id="dropzone">
+          <svg class="drop-art" viewBox="0 0 96 72" aria-hidden="true">
+            <rect x="14" y="10" width="40" height="52" rx="6" class="art-sheet-back" />
+            <rect x="30" y="4" width="44" height="56" rx="6" class="art-sheet" />
+            <rect x="38" y="16" width="26" height="4" rx="2" class="art-line" />
+            <rect x="38" y="26" width="20" height="4" rx="2" class="art-line" />
+            <rect x="38" y="36" width="24" height="4" rx="2" class="art-line" />
+            <circle cx="72" cy="52" r="14" class="art-badge" />
+            <path d="M72 59V45m-6 6l6-6 6 6" class="art-arrow" />
+          </svg>
+          <p class="drop-title">Slipp filene her</p>
+          <p class="drop-or">eller velg dem selv:</p>
+          <div class="drop-buttons">
+            <button type="button" class="btn btn-primary" id="btn-files">Velg filer</button>
+            <button type="button" class="btn btn-secondary" id="btn-folder">Velg en hel mappe</button>
+          </div>
+          <p class="drop-help" id="drop-help">Word, PowerPoint, Excel, PDF og tekstfiler. Originalene dine blir ikke endret.</p>
+        </div>
+        <input type="file" id="input-files" hidden multiple
+               accept=".docx,.pptx,.xlsx,.pdf,.txt,.md,.csv,.html,.htm,.rtf" />
+        <input type="file" id="input-folder" hidden multiple webkitdirectory />
+
+        <div class="notice notice-info" id="skipped" role="status" hidden></div>
+
+        <ul class="files" id="file-list" aria-label="Dokumenter du har lagt til"></ul>
+        <p class="files-foot" id="files-foot" hidden>
+          <button type="button" class="btn-link" id="btn-clear">Fjern alle</button>
+        </p>
+      </section>
+
+      <section class="card step" aria-labelledby="step2-title">
+        <div class="step-head">
+          <span class="step-num" aria-hidden="true">2</span>
+          <h2 id="step2-title">Velg språk</h2>
+        </div>
+        <fieldset class="langs">
+          <legend class="visually-hidden">Hvilket norsk skriftspråk vil du ha?</legend>
+          <label class="lang-option">
+            <input type="radio" name="lang" value="bokmal" checked />
+            <span class="lang-text">
+              <span class="lang-name">Bokmål</span>
+              <span class="lang-sub">Det som brukes mest</span>
+            </span>
+          </label>
+          <label class="lang-option">
+            <input type="radio" name="lang" value="nynorsk" />
+            <span class="lang-text">
+              <span class="lang-name">Nynorsk</span>
+              <span class="lang-sub">Det andre skriftspråket vårt</span>
+            </span>
+          </label>
+        </fieldset>
+      </section>
+
+      <section class="card step" aria-labelledby="step3-title">
+        <div class="step-head">
+          <span class="step-num" aria-hidden="true">3</span>
+          <h2 id="step3-title">Oversett</h2>
+        </div>
+        <p class="summary" id="summary">Legg til minst ett dokument først, så kan du starte.</p>
+        <button type="button" class="btn btn-primary btn-big" id="btn-start" disabled>Oversett til norsk</button>
+        <p class="form-error" id="start-error" role="alert" hidden></p>
+      </section>
+    </div>
+
+    <!-- Mens oversettelsen pågår -->
+    <section class="card working" id="working" aria-labelledby="working-title" hidden>
+      <svg class="work-art" viewBox="0 0 200 110" aria-hidden="true">
+        <g class="sheet-a">
+          <rect x="18" y="14" width="64" height="82" rx="8" class="art-sheet-back" />
+          <rect x="30" y="30" width="40" height="5" rx="2.5" class="art-line-muted" />
+          <rect x="30" y="42" width="32" height="5" rx="2.5" class="art-line-muted" />
+          <rect x="30" y="54" width="38" height="5" rx="2.5" class="art-line-muted" />
+          <rect x="30" y="66" width="26" height="5" rx="2.5" class="art-line-muted" />
+        </g>
+        <circle cx="92" cy="55" r="4" class="dot d1" />
+        <circle cx="104" cy="55" r="4" class="dot d2" />
+        <circle cx="116" cy="55" r="4" class="dot d3" />
+        <g class="sheet-b">
+          <rect x="126" y="10" width="64" height="86" rx="8" class="art-sheet" />
+          <rect x="138" y="28" width="40" height="5" rx="2.5" class="art-line w1" />
+          <rect x="138" y="40" width="32" height="5" rx="2.5" class="art-line w2" />
+          <rect x="138" y="52" width="38" height="5" rx="2.5" class="art-line w3" />
+          <rect x="138" y="64" width="26" height="5" rx="2.5" class="art-line w4" />
+        </g>
+      </svg>
+      <h2 id="working-title">Vi oversetter dokumentene dine</h2>
+      <p class="now" id="now"></p>
+
+      <div class="progress" id="bar" role="progressbar" aria-labelledby="working-title" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span class="progress-fill" id="bar-fill"></span>
+      </div>
+      <div class="progress-row">
+        <span class="pct" id="pct">0 %</span>
+        <span class="eta" id="eta"></span>
+      </div>
+      <p class="hint" id="eta-hint" hidden>Dette er et første anslag. Det blir mer nøyaktig etter hvert.</p>
+
+      <p class="heartbeat" id="heartbeat">
+        <span class="beat" aria-hidden="true"></span>
+        Sist oppdatert: <span id="hb-time">akkurat nå</span>
+      </p>
+      <div class="notice notice-warn" id="lost" role="alert" hidden>
+        <p><strong>Mistet kontakten med serveren – prøver igjen …</strong></p>
+        <p>Oversettelsen fortsetter på serveren i mellomtiden. <button type="button" class="btn-link" id="btn-retry">Prøv nå</button></p>
+      </div>
+
+      <div class="reassure">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 7v5l3 2" /><circle cx="12" cy="12" r="8.5" /></svg>
+        <p>Du kan vente her, eller lukke siden og komme tilbake senere. Oversettelsen fortsetter, og de ferdige dokumentene blir liggende under «Mine dokumenter».</p>
+      </div>
+
+      <ul class="work-files" id="work-files" aria-label="Dokumentene i denne oversettelsen"></ul>
+
+      <div class="working-actions">
+        <button type="button" class="btn btn-secondary" id="btn-notify" hidden>Gi meg beskjed når det er ferdig</button>
+        <p class="hint" id="notify-on" hidden>Du får en beskjed her i nettleseren når det er ferdig, så lenge siden er åpen.</p>
+        <button type="button" class="btn-link btn-quiet" id="btn-cancel">Avbryt oversettelsen</button>
+      </div>
+      <p class="visually-hidden" id="announce" role="status"></p>
+    </section>
+
+    <!-- Når oversettelsen er ferdig -->
+    <section class="card done" id="done" aria-labelledby="done-title" hidden>
+      <div class="done-mark" id="done-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><path d="M6 12.5l4 4 8-9" /></svg>
+      </div>
+      <h2 id="done-title" tabindex="-1"></h2>
+      <p class="lead" id="done-lead"></p>
+      <ul class="results" id="results"></ul>
+      <div class="done-actions">
+        <a class="btn btn-secondary" id="zip-link" href="#" download hidden>Last ned alle (.zip)</a>
+        <button type="button" class="btn btn-primary" id="btn-again">Oversett flere dokumenter</button>
+      </div>
+      <p class="muted center">Du finner dem også under «Mine dokumenter» lenger ned.</p>
+    </section>
+
+    <section class="card mine" id="mine" aria-labelledby="mine-title" tabindex="-1">
+      <h2 id="mine-title">Mine dokumenter</h2>
+      <p class="muted">Dokumentene dine blir liggende her til du sletter dem.</p>
+      <div id="doc-groups">
+        <p class="empty">Henter dokumentene dine …</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>InnNorsk oversetter med kunstig intelligens. Les gjerne gjennom viktige dokumenter før du sender dem videre.</p>
+  </footer>
 
   <dialog class="modal" id="pw-dialog" aria-labelledby="pw-title">
-    <form id="pw-form" class="modal-body" novalidate>
+    <form class="modal-body" id="pw-form" novalidate>
       <h2 id="pw-title">Bytt passord</h2>
-      <label class="field">
-        <span>Nåværende passord</span>
+      <div class="field">
+        <label for="pw-current">Passordet du bruker nå</label>
         <input type="password" id="pw-current" autocomplete="current-password" required />
-      </label>
-      <label class="field">
-        <span>Nytt passord (minst 10 tegn)</span>
-        <input type="password" id="pw-new" autocomplete="new-password" minlength="10" required />
-      </label>
-      <label class="field">
-        <span>Gjenta nytt passord</span>
-        <input type="password" id="pw-repeat" autocomplete="new-password" minlength="10" required />
+      </div>
+      <div class="field">
+        <label for="pw-new">Nytt passord</label>
+        <input type="password" id="pw-new" autocomplete="new-password" minlength="8" required aria-describedby="pw-help" />
+        <p class="field-help" id="pw-help">Minst 8 tegn. Tre–fire vanlige ord etter hverandre er lett å huske.</p>
+      </div>
+      <div class="field">
+        <label for="pw-repeat">Skriv det nye passordet en gang til</label>
+        <input type="password" id="pw-repeat" autocomplete="new-password" minlength="8" required />
+      </div>
+      <label class="check">
+        <input type="checkbox" id="pw-show" />
+        <span>Vis passordene</span>
       </label>
       <p class="form-error" id="pw-error" role="alert" hidden></p>
-      <p class="form-ok" id="pw-ok" role="status" hidden>Passordet er endret.</p>
-      <div class="row end">
-        <button type="button" class="paper quiet" id="pw-cancel">Lukk</button>
-        <button type="submit" class="paper dark" id="pw-save">Lagre nytt passord</button>
+      <p class="form-ok" id="pw-ok" role="status" hidden>Passordet er byttet. Hvis du var logget inn andre steder, er du logget ut der.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-secondary" id="pw-close">Lukk</button>
+        <button type="submit" class="btn btn-primary" id="pw-save">Lagre nytt passord</button>
       </div>
     </form>
   </dialog>

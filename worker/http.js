@@ -1,0 +1,31 @@
+// Felles hjelpere for rutene: norske feil som JSON, trygg JSON-lesing og loggkontekst.
+export class HttpError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export function fail(status, message) {
+  throw new HttpError(status, message);
+}
+
+export async function readJson(c) {
+  try {
+    const body = await c.req.json();
+    if (body && typeof body === "object" && !Array.isArray(body)) return body;
+  } catch {
+    // faller gjennom til feilmeldingen under
+  }
+  return fail(400, "Ugyldig forespørsel.");
+}
+
+export const clientIp = (c) => c.req.header("CF-Connecting-IP") || null;
+
+export function reqCtx(c, extra = {}) {
+  const user = c.get("user");
+  const session = c.get("session");
+  return { userId: user ? user.id : null, sessionId: session ? session.id : null, ip: clientIp(c), ...extra };
+}
+
+export const str = (v, max = 500) => (typeof v === "string" ? v.slice(0, max) : "");
