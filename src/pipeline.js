@@ -4,6 +4,7 @@ const { translateDocxBuffer } = require("./formats/docx");
 const { translatePptxBuffer } = require("./formats/pptx");
 const { translateXlsxBuffer } = require("./formats/xlsx");
 const { translatePdfToDocx } = require("./formats/pdf");
+const { validateOutput } = require("./validate");
 const {
   translatePlain,
   translateCsv,
@@ -25,6 +26,101 @@ const HANDLERS = {
 };
 
 const SUPPORTED = Object.keys(HANDLERS);
+
+// Word-/LibreOffice-låsefiler og systemfiler er ikke dokumenter.
+function isIgnoredName(name) {
+  const base = path.basename(String(name || ""));
+  return (
+    base.startsWith("~$") ||
+    base.startsWith(".~lock") ||
+    /^(thumbs\.db|desktop\.ini)$/i.test(base)
+  );
+}
+
+function extOf(name) {
+  return path.extname(String(name || "")).toLowerCase();
+}
+
+function outputNameFor(relPath) {
+  const ext = extOf(relPath);
+  const handler = HANDLERS[ext];
+  if (!handler) return relPath;
+  return relPath.slice(0, relPath.length - ext.length) + handler.outExt;
+}
+
+// To innfiler kan gi samme utfil (x.pdf og x.docx -> x.docx). Den første beholder
+// navnet, de neste får kildeformatet i navnet: "x (pdf).docx".
+function assignOutputNames(relPaths) {
+  const taken = new Set();
+  const out = new Map();
+  const ordered = [...relPaths].sort((a, b) => {
+    const sa = extOf(a) === HANDLERS[extOf(a)]?.outExt ? 0 : 1;
+    const sb = extOf(b) === HANDLERS[extOf(b)]?.outExt ? 0 : 1;
+    return sa - sb || a.localeCompare(b, "nb");
+  });
+  for (const rel of ordered) {
+    let name = outputNameFor(rel);
+    if (taken.has(name.toLowerCase())) {
+      const ext = extOf(rel);
+      const outExt = HANDLERS[ext] ? HANDLERS[ext].outExt : ext;
+      const stem = rel.slice(0, rel.length - ext.length);
+      name = `${stem} (${ext.slice(1)})${outExt}`;
+      let n = 2;
+      while (taken.has(name.toLowerCase())) {
+        name = `${stem} (${ext.slice(1)} ${n++})${outExt}`;
+      }
+    }
+    taken.add(name.toLowerCase());
+    out.set(rel, name);
+  }
+  return out;
+}
+
+async function translateBuffer(buffer, ext, ctx) {
+  const key = String(ext || "").toLowerCase();
+  const handler = HANDLERS[key];
+  if (!handler) throw new Error(`Filtypen ${key} støttes ikke.`);
+  const warnings = [];
+  const onWarning = (w) => {
+    warnings.push(w);
+    if (ctx && ctx.onWarning) ctx.onWarning(w);
+  };
+  const output = await handler.run(buffer, { ...ctx, onWarning });
+  const check = await validateOutput(output, handler.outExt);
+  if (!check.ok) {
+    const err = new Error(
+      "Den oversatte filen ble ugyldig og er ikke lagret. Feilen er logget."
+    );
+    err.code = "invalid_output";
+    err.details = check.errors;
+    throw err;
+  }
+  return { buffer: output, outExt: handler.outExt, warnings };
+}
+
+async function analyzeBuffer(buffer, ext) {
+  const key = String(ext || "").toLowerCase();
+  const handler = HANDLERS[key];
+  if (!handler) throw new Error(`Filtypen ${key} støttes ikke.`);
+  const calls = [];
+  let segments = 0;
+  let chars = 0;
+  await handler.run(buffer, {
+    dryRun: true,
+    apiKey: "",
+    onPlan: (p) => {
+      calls.push(p.batches);
+      segments += p.segments;
+      chars += p.chars;
+    },
+  });
+  return {
+    calls,
+    segments,
+    chars,
+    batches: calls.reduce((n, c) => n + c.length, 0),
+  };
+}
 
 function isInside(parent, child) {
   const rel = path.relative(parent, child);
@@ -49,7 +145,7 @@ function listDocuments(inputFolder, outputFolder) {
         walk(full);
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name).toLowerCase();
-        if (SUPPORTED.includes(ext)) files.push(full);
+        if (SUPPORTED.includes(ext) && !isIgnoredName(entry.name)) files.push(full);
       }
     }
   };
@@ -97,7 +193,7 @@ async function translateFile(file, { inputFolder, outputFolder, skipExisting, ap
   }
 
   const buffer = fs.readFileSync(file);
-  const translated = await handler.run(buffer, {
+  const { buffer: translated, warnings } = await translateBuffer(buffer, ext, {
     apiKey,
     model,
     targetLanguage,
@@ -106,11 +202,17 @@ async function translateFile(file, { inputFolder, outputFolder, skipExisting, ap
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, translated);
-  return { dest, skipped: false };
+  return { dest, skipped: false, warnings };
 }
 
 module.exports = {
+  HANDLERS,
   SUPPORTED,
+  isIgnoredName,
+  outputNameFor,
+  assignOutputNames,
+  translateBuffer,
+  analyzeBuffer,
   scanFolder,
   translateFile,
   isInside,

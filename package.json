@@ -12,6 +12,8 @@
     "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site\""
   },
   "dependencies": {
+    "express": "^5.2.1",
+    "fast-xml-parser": "^5.11.1",
     "jszip": "^3.10.1",
     "pdf-parse": "^1.1.1",
     "pdfjs-dist": "^3.11.174",

@@ -46,35 +46,54 @@ function apiErrorMessage(data, status) {
   return `xAI-feil ${status}`;
 }
 
-async function grokRequest({ apiKey, model, input }) {
+function baseUrlOf(baseUrl) {
+  return String(baseUrl || process.env.XAI_BASE_URL || "https://api.x.ai").replace(/\/+$/, "");
+}
+
+async function grokRequest({ apiKey, model, input, baseUrl, signal, onCall, items }) {
   const key = sanitizeKey(apiKey);
-  const res = await fetch("https://api.x.ai/v1/responses", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: model || "grok-4.6",
-      input,
-      store: false,
-      temperature: 0.15,
-    }),
-  });
+  const t0 = Date.now();
+  const report = (extra) => {
+    if (onCall) onCall({ attempt: 1, items: items || 0, inputChars: input.length, ms: Date.now() - t0, ...extra });
+  };
+  let res;
+  try {
+    res = await fetch(`${baseUrlOf(baseUrl)}/v1/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model || "grok-4.6",
+        input,
+        store: false,
+        temperature: 0.15,
+      }),
+      signal,
+    });
+  } catch (err) {
+    report({ ok: false, status: 0, outputChars: 0, error: err.message });
+    throw err;
+  }
 
   const raw = await res.text();
   let data;
   try {
     data = JSON.parse(raw);
   } catch {
+    report({ ok: false, status: res.status, outputChars: 0, error: "invalid json" });
     throw new Error(`Ugyldig svar fra xAI (${res.status}): ${raw.slice(0, 240)}`);
   }
 
   if (!res.ok) {
-    throw new Error(apiErrorMessage(data, res.status));
+    const message = apiErrorMessage(data, res.status);
+    report({ ok: false, status: res.status, outputChars: 0, error: message });
+    throw new Error(message);
   }
 
   const text = extractOutputText(data).trim();
+  report({ ok: Boolean(text), status: res.status, outputChars: text.length, usage: data.usage || null });
   if (!text) throw new Error("Tomt svar fra Grok.");
   return text;
 }
@@ -99,18 +118,11 @@ function parseJsonArray(text, expected) {
   return parsed.map((item) => (item == null ? "" : String(item)));
 }
 
-async function translateStrings({ apiKey, model, targetLanguage, strings, onProgress }) {
-  const label = LANGUAGE_LABEL[targetLanguage] || LANGUAGE_LABEL.bokmal;
-  const result = new Array(strings.length).fill("");
+function planBatches(strings) {
   const work = [];
-
   strings.forEach((s, i) => {
     const t = String(s ?? "");
-    if (!t.trim()) {
-      result[i] = t;
-    } else {
-      work.push({ i, t });
-    }
+    if (t.trim()) work.push({ i, t });
   });
 
   const batches = [];
@@ -127,9 +139,32 @@ async function translateStrings({ apiKey, model, targetLanguage, strings, onProg
     chars += extra;
   }
   if (current.length) batches.push(current);
+  return batches.map((items) => ({
+    items,
+    chars: items.reduce((n, it) => n + it.t.length, 0),
+  }));
+}
+
+async function translateStrings(ctx) {
+  const { apiKey, model, baseUrl, signal, targetLanguage, strings, onProgress, onPlan, onBatch, onCall, dryRun } = ctx;
+  const label = LANGUAGE_LABEL[targetLanguage] || LANGUAGE_LABEL.bokmal;
+  const result = strings.map((s) => String(s ?? ""));
+  const planned = planBatches(strings);
+  const total = planned.reduce((n, b) => n + b.items.length, 0);
+
+  if (onPlan) {
+    onPlan({
+      batches: planned.map((b) => b.chars),
+      segments: total,
+      chars: planned.reduce((n, b) => n + b.chars, 0),
+    });
+  }
+  if (dryRun) return result;
 
   let done = 0;
-  for (const batch of batches) {
+  for (const planBatch of planned) {
+    const batch = planBatch.items;
+    const started = Date.now();
     const payload = batch.map((b) => b.t);
     const prompt = [
       `Du er en profesjonell oversetter til ${label}.`,
@@ -146,12 +181,12 @@ async function translateStrings({ apiKey, model, targetLanguage, strings, onProg
 
     let translated;
     try {
-      const text = await grokRequest({ apiKey, model, input: prompt });
+      const text = await grokRequest({ apiKey, model, baseUrl, signal, onCall, items: batch.length, input: prompt });
       translated = parseJsonArray(text, payload.length);
     } catch (firstErr) {
       const retryPrompt = `${prompt}\n\nSvar kun med gyldig JSON-array. Ingen annen tekst.`;
       try {
-        const text = await grokRequest({ apiKey, model, input: retryPrompt });
+        const text = await grokRequest({ apiKey, model, baseUrl, signal, onCall, items: batch.length, input: retryPrompt });
         translated = parseJsonArray(text, payload.length);
       } catch {
         throw firstErr;
@@ -162,15 +197,19 @@ async function translateStrings({ apiKey, model, targetLanguage, strings, onProg
       result[batch[n].i] = t;
     });
     done += batch.length;
+    if (onBatch) {
+      onBatch({ chars: planBatch.chars, items: batch.length, ms: Date.now() - started, ok: true });
+    }
     if (onProgress) {
-      onProgress({ done, total: work.length });
+      onProgress({ done, total });
     }
   }
 
   return result;
 }
 
-async function translateDocumentText({ apiKey, model, targetLanguage, text, onProgress }) {
+async function translateDocumentText(ctx) {
+  const { text } = ctx;
   const source = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const trailing = source.match(/\n+$/);
   const core = trailing ? source.slice(0, -trailing[0].length) : source;
@@ -186,13 +225,7 @@ async function translateDocumentText({ apiKey, model, targetLanguage, text, onPr
   pieces.push({ kind: "text", value: core.slice(last) });
 
   const strings = pieces.filter((p) => p.kind === "text").map((p) => p.value);
-  const translated = await translateStrings({
-    apiKey,
-    model,
-    targetLanguage,
-    strings,
-    onProgress,
-  });
+  const translated = await translateStrings({ ...ctx, strings });
 
   let ti = 0;
   let out = "";
@@ -205,10 +238,12 @@ async function translateDocumentText({ apiKey, model, targetLanguage, text, onPr
   return out;
 }
 
-async function testConnection({ apiKey, model }) {
+async function testConnection({ apiKey, model, baseUrl, signal }) {
   const text = await grokRequest({
     apiKey,
     model,
+    baseUrl,
+    signal,
     input:
       "Svar med nøyaktig ett ord: OK. Ingen annen tekst.",
   });
@@ -216,6 +251,7 @@ async function testConnection({ apiKey, model }) {
 }
 
 module.exports = {
+  planBatches,
   grokRequest,
   translateStrings,
   translateDocumentText,

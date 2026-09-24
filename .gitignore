@@ -4,3 +4,7 @@ dist/
 *.log
 site/InnNorsk-Windows.zip
 assets/icon.iconset/
+data/
+.env
+.env.*
+!.env.example
