@@ -1,27 +1,48 @@
 # InnNorsk
 
-Windows-app som oversetter dokumenter til norsk med Grok (xAI). Filene leses lokalt. API-nøkkelen limer du inn under **Innstillinger**.
+Dokumentoversetter til norsk med Grok (xAI).
 
-## Last ned
+**Kildekode og dokumentasjon ligger i dette repoet.**  
+**GitHub Pages er bare nedlastingssiden** for Windows-bygget, ikke selve appen.
 
-[Last ned for Windows](https://github.com/TidemannEsbjug/InnNorsk/releases/latest/download/InnNorsk-Windows.zip)
+| | |
+|---|---|
+| Repo | https://github.com/TidemannEsbjug/InnNorsk |
+| Nedlasting (Windows) | https://tidemannesbjug.github.io/InnNorsk/ |
+| Siste `.exe`-zip | [InnNorsk-Windows.zip](https://github.com/TidemannEsbjug/InnNorsk/releases/latest/download/InnNorsk-Windows.zip) |
 
-Nettside: https://tidemannesbjug.github.io/InnNorsk/
+Versjon: **1.2.0** (lokal Electron-app). Retning: skyapp, se [docs/PRODUCT.md](docs/PRODUCT.md).
 
-## Slik bruker du den
+## Hva appen gjør
 
-1. Pakk ut zip-filen og kjør `InnNorsk.exe`.
-2. Åpne **Innstillinger** og lim inn en nøkkel fra [console.x.ai](https://console.x.ai).
-3. Velg inn-mappe, trykk **Oversett til norsk**.
-4. Finn resultatet i ut-mappen (`oversatt` som standard).
+1. Legg dokumenter i en mappe.
+2. Velg mappen som inn-kurv, lim inn xAI-nøkkel under Innstillinger.
+3. Trykk **Oversett til norsk**.
+4. Ferdige filer lander i ut-kurven (`oversatt/`). Originalene endres ikke.
 
-Støttede filer: `.docx` `.pdf` `.pptx` `.xlsx` `.txt` `.md` `.csv` `.html` `.rtf`.
+Oversettelsen skal se ut som originalen: avsnitt, linjeskift, skrift og skriftstørrelse.
 
-Oversettelsen skal se ut som originalen: samme avsnitt, linjeskift, skrift og skriftstørrelse. Word og PowerPoint oversettes på stedet (stiler og tema beholdes). PDF skrives ut som Word med skriftstørrelse og font hentet fra PDF-en. Skannede PDF-er uten tekstlag kan ikke oversettes.
+Støtte: `.docx` `.pdf` `.pptx` `.xlsx` `.txt` `.md` `.csv` `.html` `.rtf`.  
+PDF skrives som Word. Skannet PDF uten tekstlag går ikke.
 
-## Utvikling
+Nøkkelen må ha chat/model-tilgang i [console.x.ai](https://console.x.ai) (`api-key:endpoint:*`, ikke bare voice).
+
+## For utviklere og Claude Cloud
+
+Les først:
+
+- [CLAUDE.md](CLAUDE.md) — hvordan jobbe i repoet
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — hva som kjører hvor
+- [docs/PRODUCT.md](docs/PRODUCT.md) — krav og sky-retning
 
 ```bash
 npm install
-npm start
+npm start                 # Electron lokalt
+node scripts/pack-win.js  # Windows-zip → dist/InnNorsk-Windows.zip
 ```
+
+Ikke commit `node_modules/`, `dist/` eller API-nøkler.
+
+## Lisens
+
+MIT. See [LICENSE](LICENSE).
