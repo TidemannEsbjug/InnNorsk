@@ -2,18 +2,19 @@
   "name": "innnorsk",
   "productName": "InnNorsk",
   "version": "1.2.0",
-  "description": "Oversett dokumenter til norsk med Grok — skyapp med innlogging, og lokal Windows-app.",
+  "description": "Oversett dokumenter til norsk med Grok — skyapp på Cloudflare med innlogging, og lokal Windows-app.",
   "main": "src/main.js",
   "author": "InnNorsk",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "server": "node --disable-warning=ExperimentalWarning server/index.js",
-    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
-    "create-user": "node --disable-warning=ExperimentalWarning server/cli.js create-user",
+    "dev": "wrangler dev",
+    "db:migrate:local": "wrangler d1 migrations apply innnorsk --local",
+    "deploy": "wrangler d1 migrations apply innnorsk --remote && wrangler deploy",
     "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\"",
-    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site|server|web|test|data|Dockerfile|render.yaml\"",
-    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site|server|web|test|data|Dockerfile|render.yaml\""
+    "e2e": "node test/e2e/e2e.js",
+    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site|worker|web|test|migrations|wrangler.jsonc|\\.wrangler|\\.dev\\.vars\"",
+    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site|worker|web|test|migrations|wrangler.jsonc|\\.wrangler|\\.dev\\.vars\""
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.1",
