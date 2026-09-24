@@ -1,77 +1,55 @@
 import {
-  api, h, fill, formatDuration, formatClock, formatDateTime, formatBytes, formatNumber,
-  statusLabel, LANGUAGE_LABELS, logout, reportErrors,
+  api, upload, h, fill, icon, formatDuration, formatClock, formatDay, formatBytes, plural, relativeTime,
+  startOfDay, LANGUAGE_LABELS, remember, recall, confirmDialog, toast, logout, reportErrors,
 } from "./api.js";
 
 reportErrors();
 
 const SUPPORTED = [".docx", ".pptx", ".xlsx", ".pdf", ".txt", ".md", ".csv", ".html", ".htm", ".rtf"];
 const ACTIVE = new Set(["queued", "running"]);
-const FINAL = new Set(["done", "partial", "failed", "cancelled"]);
-const IN_PROGRESS_FILE = new Set(["ready", "queued", "working"]);
-const HELP = "Prøv igjen om litt. Hvis det fortsetter, si fra til den som har satt opp InnNorsk for deg.";
+const TITLE = "InnNorsk";
+const LAST_VISIT = "innnorsk.lastVisit";
+const LANGUAGE = "innnorsk.language";
 
 const SKIP_REASONS = {
-  lock: "Midlertidige filer fra Word eller Office (navnet starter med ~$)",
-  hidden: "Skjulte filer",
-  system: "Systemfiler fra Windows (Thumbs.db, desktop.ini)",
-  type: "Filtyper som ikke kan oversettes",
-  empty: "Tomme filer",
-  duplicate: "Allerede lagt til",
+  lock: "Midlertidige filer fra Word eller Office (navnet starter med ~$). De lages automatisk og er ikke ekte dokumenter.",
+  hidden: "Skjulte filer og systemfiler.",
+  type: "Filtyper som ikke kan oversettes.",
+  empty: "Tomme filer.",
+  duplicate: "Filer du allerede har lagt til.",
 };
 
 const $ = (id) => document.getElementById(id);
-const els = {
-  who: $("who"),
-  adminLink: $("admin-link"),
-  lang: $("lang"),
-  langNote: $("lang-note"),
-  dropzone: $("dropzone"),
-  btnFiles: $("btn-files"),
-  btnFolder: $("btn-folder"),
-  inputFiles: $("input-files"),
-  inputFolder: $("input-folder"),
-  skipped: $("skipped"),
-  inList: $("in-list"),
-  btnRestart: $("btn-restart"),
-  slipLabel: $("slip-label"),
-  slipValue: $("slip-value"),
-  slipLine: $("slip-line"),
-  slipNote: $("slip-note"),
-  overall: $("overall"),
-  start: $("btn-start"),
-  stampSub: $("stamp-sub"),
-  cancel: $("btn-cancel"),
-  btnNew: $("btn-new"),
-  alert: $("alert"),
-  utTitle: $("ut-title"),
-  zip: $("zip-link"),
-  outList: $("out-list"),
-  utNote: $("ut-note"),
-  history: $("history-list"),
-};
+const enc = encodeURIComponent;
+const smooth = () => (matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth");
 
 const state = {
+  lang: recall(LANGUAGE) === "nynorsk" ? "nynorsk" : "bokmal",
+  gen: 0, // økes når utkastet forkastes, så svar fra gamle opplastinger ignoreres
   job: null,
   files: [],
-  uploads: [], // { file, path, status: waiting|uploading|error, pct, error, bar, xhr, removed }
-  round: 0, // økes ved «Begynn på nytt», så svar fra en gammel runde ignoreres
+  sources: new Map(), // fileId → lokal fil, så filene kan lastes opp på nytt hvis språket byttes
+  uploads: [], // { file, path, status: "waiting" | "uploading" | "error", pct, error, controller }
+  creating: null,
   pumping: false,
-  creatingJob: null,
+  view: "setup",
+  seq: 0,
+  applied: 0,
+  polling: false,
   pollTimer: 0,
-  pollFailures: 0,
-  history: [],
+  tickTimer: 0,
+  lastOk: 0,
+  failures: 0,
+  notify: false,
+  spoken: "",
+  documents: [],
+  lastVisit: recall(LAST_VISIT),
 };
 
-// ---------- Hjelpere ----------
-
-function extOf(name) {
-  const i = name.lastIndexOf(".");
-  return i > 0 ? name.slice(i).toLowerCase() : "";
-}
+// ---------- Små hjelpere ----------
 
 function baseName(path) {
-  return path.slice(path.lastIndexOf("/") + 1);
+  return String(path || "").slice(String(path || "").lastIndexOf("/") + 1);
 }
 
 function dirName(path) {
@@ -79,59 +57,65 @@ function dirName(path) {
   return i > 0 ? path.slice(0, i + 1) : "";
 }
 
-function phase() {
-  const status = state.job && state.job.status;
-  if (!status || status === "draft") return "draft";
-  return ACTIVE.has(status) ? "active" : "final";
+function extOf(name) {
+  const base = baseName(name);
+  const i = base.lastIndexOf(".");
+  return i > 0 ? base.slice(i).toLowerCase() : "";
 }
 
-function plural(n, one, many) {
-  return `${formatNumber(n)} ${n === 1 ? one : many}`;
+const jobUrl = (id, rest = "") => `/api/jobs/${enc(id)}${rest}`;
+const fileUrl = (jobId, fileId, rest = "") => jobUrl(jobId, `/files/${enc(fileId)}${rest}`);
+const langName = (lang) => (LANGUAGE_LABELS[lang] || "norsk").toLowerCase();
+
+function showAlert(message) {
+  fill($("alert"), message ? h("p", null, message) : null);
+  $("alert").hidden = !message;
 }
 
-function showAlert(message, hint = HELP) {
-  fill(els.alert,
-    h("strong", null, "Noe gikk galt. "),
-    message,
-    hint ? h("span", { class: "alert-hint" }, hint) : null
+function extBadge(name) {
+  const ext = extOf(name).slice(1);
+  return h("span", { class: `ext ext-${ext || "fil"}`, "aria-hidden": "true" }, ext.toUpperCase() || "FIL");
+}
+
+function nameLine(path) {
+  return h("p", { class: "file-name" },
+    dirName(path) ? h("span", { class: "file-dir" }, dirName(path)) : null,
+    baseName(path)
   );
-  els.alert.hidden = false;
 }
 
-function clearAlert() {
-  els.alert.hidden = true;
+function removeButton(name, onclick) {
+  return h("button", { type: "button", class: "icon-btn", "aria-label": `Fjern ${name}`, title: "Fjern", onclick }, icon("close"));
 }
 
-function fileUrl(file) {
-  return `/api/jobs/${encodeURIComponent(file.jobId || state.job.id)}/files/${encodeURIComponent(file.id)}`;
+function groupBy(list, keyOf) {
+  const groups = new Map();
+  for (const item of list) {
+    const key = keyOf(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  return groups;
 }
 
-function zipUrl(jobId) {
-  return `/api/jobs/${encodeURIComponent(jobId)}/download.zip`;
-}
-
-// ---------- Legge til filer ----------
+// ---------- Steg 1: legge til filer ----------
 
 function skipReason(path, file, known) {
   const parts = path.split("/");
   const name = parts[parts.length - 1];
   if (name.startsWith("~$") || name.startsWith(".~lock")) return "lock";
-  if (parts.some((p) => p.startsWith("."))) return "hidden";
-  if (/^(thumbs\.db|desktop\.ini)$/i.test(name)) return "system";
+  if (parts.some((p) => p.startsWith(".")) || /^(thumbs\.db|desktop\.ini)$/i.test(name)) return "hidden";
   if (!SUPPORTED.includes(extOf(name))) return "type";
   if (file.size === 0) return "empty";
   if (known.has(path.toLowerCase())) return "duplicate";
   return null;
 }
 
+const newUpload = (file, path) => ({ file, path, status: "waiting", pct: 0, error: "" });
+
 function addEntries(entries) {
-  if (phase() === "active") {
-    showAlert("Vent til denne oversettelsen er ferdig før du legger inn nye filer.", "");
-    return;
-  }
-  if (phase() === "final") resetRound();
-  clearAlert();
-  const known = new Set([...state.files.map((f) => f.path), ...state.uploads.map((u) => u.path)].map((p) => p.toLowerCase()));
+  showAlert("");
+  const known = new Set([...state.files, ...state.uploads].map((f) => f.path.toLowerCase()));
   const skipped = {};
   let added = 0;
   for (const { file, path } of entries) {
@@ -141,36 +125,35 @@ function addEntries(entries) {
       continue;
     }
     known.add(path.toLowerCase());
-    state.uploads.push({ file, path, status: "waiting", pct: 0, error: "" });
+    state.uploads.push(newUpload(file, path));
     added++;
   }
   renderSkipped(skipped, added);
-  render();
+  renderSetup();
   pump();
 }
 
 function renderSkipped(skipped, added) {
+  const box = $("skipped");
   const reasons = Object.keys(skipped);
   if (!reasons.length) {
-    els.skipped.hidden = true;
+    box.hidden = true;
     return;
   }
   const total = reasons.reduce((n, r) => n + skipped[r].length, 0);
-  const list = h("ul", null, reasons.map((r) => {
-    const names = skipped[r].map(baseName);
-    const shown = names.slice(0, 6).join(", ");
-    const more = names.length > 6 ? ` og ${names.length - 6} til` : "";
-    return h("li", null, h("strong", null, `${SKIP_REASONS[r]}: `), shown + more);
-  }));
-  fill(els.skipped,
-    h("button", { type: "button", class: "notice-close", "aria-label": "Lukk meldingen", onclick: () => { els.skipped.hidden = true; } }, "×"),
-    h("p", null, added
-      ? `${plural(total, "fil ble", "filer ble")} hoppet over. De andre er lagt til.`
-      : `${plural(total, "fil ble", "filer ble")} hoppet over, og ingen nye filer ble lagt til.`),
-    list,
-    skipped.type ? h("p", { class: "small-note" }, "Disse kan oversettes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekst (.txt, .md, .csv), nettsider (.html) og RTF.") : null
+  const names = (paths) => {
+    const list = paths.map(baseName);
+    return list.slice(0, 4).join(", ") + (list.length > 4 ? ` og ${list.length - 4} til` : "");
+  };
+  fill(box,
+    h("button", { type: "button", class: "icon-btn notice-close", "aria-label": "Lukk meldingen", onclick: () => { box.hidden = true; } }, icon("close")),
+    h("p", null,
+      h("strong", null, total === 1 ? "Én fil ble ikke lagt til." : `${total} filer ble ikke lagt til.`),
+      added ? " Resten er lagt til som vanlig." : ""),
+    h("ul", null, reasons.map((r) => h("li", null, SKIP_REASONS[r], " ", h("span", { class: "muted" }, names(skipped[r]))))),
+    skipped.type ? h("p", { class: "muted" }, "Dette kan oversettes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekstfiler (.txt, .md, .csv), nettsider (.html) og RTF.") : null
   );
-  els.skipped.hidden = false;
+  box.hidden = false;
 }
 
 function fromFileList(list) {
@@ -204,90 +187,29 @@ async function entriesFromDrop(dataTransfer) {
 
 // ---------- Opplasting ----------
 
-async function ensureJob() {
-  if (state.job) return state.job;
-  const round = state.round;
-  state.creatingJob ||= api("/api/jobs", { method: "POST", body: { targetLanguage: els.lang.value } })
-    .then(({ job }) => {
-      if (state.round === round) state.job = job;
+function discardJob(id) {
+  api(jobUrl(id), { method: "DELETE" }).catch(() => {});
+}
+
+// Utkastet lages først når den første filen lastes opp, med språket som er valgt da.
+function ensureJob() {
+  if (state.job) return Promise.resolve(state.job);
+  if (!state.creating) {
+    const gen = state.gen;
+    state.creating = api("/api/jobs", { method: "POST", body: { targetLanguage: state.lang } }).then(({ job }) => {
+      if (gen !== state.gen) {
+        discardJob(job.id);
+        throw new DOMException("Utdatert", "AbortError");
+      }
+      state.job = job;
+      state.creating = null;
       return job;
-    })
-    .finally(() => {
-      if (state.round === round) state.creatingJob = null;
+    }, (err) => {
+      if (gen === state.gen) state.creating = null;
+      throw err;
     });
-  return state.creatingJob;
-}
-
-function uploadFile(jobId, item) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    item.xhr = xhr;
-    xhr.open("PUT", `/api/jobs/${encodeURIComponent(jobId)}/files?path=${encodeURIComponent(item.path)}`);
-    xhr.setRequestHeader("X-InnNorsk", "1");
-    xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    xhr.upload.addEventListener("progress", (e) => {
-      if (!e.lengthComputable) return;
-      item.pct = Math.round((e.loaded / e.total) * 100);
-      if (item.bar) item.bar.value = item.pct;
-    });
-    xhr.addEventListener("load", () => {
-      if (xhr.status === 401) {
-        location.href = "/login";
-        return;
-      }
-      let data = null;
-      try {
-        data = JSON.parse(xhr.responseText);
-      } catch {
-        data = null;
-      }
-      if (xhr.status >= 200 && xhr.status < 300 && data && data.file) resolve(data.file);
-      else if (xhr.status === 413) reject(new Error((data && data.error) || "Filen er for stor til å lastes opp."));
-      else reject(new Error((data && data.error) || `Opplastingen feilet (feilkode ${xhr.status}).`));
-    });
-    xhr.addEventListener("error", () => reject(new Error("Opplastingen ble brutt. Sjekk internettforbindelsen og trykk «Prøv igjen».")));
-    xhr.addEventListener("abort", () => reject(new Error("Opplastingen ble avbrutt.")));
-    xhr.send(item.file);
-  });
-}
-
-async function pump() {
-  if (state.pumping) return;
-  state.pumping = true;
-  let uploaded = false;
-  try {
-    for (;;) {
-      const item = state.uploads.find((u) => u.status === "waiting");
-      if (!item) break;
-      item.status = "uploading";
-      item.pct = 0;
-      render();
-      try {
-        const job = await ensureJob();
-        if (item.removed) throw new Error("Fjernet");
-        const file = await uploadFile(job.id, item);
-        if (state.job && state.job.id === job.id) {
-          state.files.push(file);
-          uploaded = true;
-        }
-        dropUpload(item);
-      } catch (err) {
-        if (item.removed) dropUpload(item);
-        else {
-          item.status = "error";
-          item.error = err.message;
-        }
-      }
-      item.xhr = null;
-      render();
-    }
-    if (uploaded) await refreshJob();
-  } catch (err) {
-    showAlert(err.message);
-  } finally {
-    state.pumping = false;
-    render();
   }
+  return state.creating;
 }
 
 function dropUpload(item) {
@@ -295,397 +217,564 @@ function dropUpload(item) {
   if (i >= 0) state.uploads.splice(i, 1);
 }
 
-function removeUpload(item) {
-  if (item.status === "uploading" && item.xhr) {
-    item.removed = true;
-    item.xhr.abort();
-  } else {
-    dropUpload(item);
-    render();
+function showUploadProgress(item, pct) {
+  item.pct = pct;
+  if (item.fill) item.fill.style.transform = `scaleX(${pct / 100})`;
+  if (item.label) item.label.textContent = uploadText(item);
+}
+
+async function pump() {
+  if (state.pumping) return;
+  state.pumping = true;
+  let item;
+  while ((item = state.uploads.find((u) => u.status === "waiting"))) {
+    const gen = state.gen;
+    item.status = "uploading";
+    item.pct = 0;
+    item.controller = new AbortController();
+    renderSetup();
+    try {
+      const job = await ensureJob();
+      const url = `${jobUrl(job.id, "/files")}?path=${enc(item.path)}`;
+      const current = item;
+      const { file } = await upload(url, item.file, { signal: item.controller.signal, onProgress: (pct) => showUploadProgress(current, pct) });
+      if (gen === state.gen) {
+        state.files.push(file);
+        state.sources.set(file.id, item.file);
+        dropUpload(item);
+      }
+    } catch (err) {
+      if (err.name === "AbortError") dropUpload(item);
+      else Object.assign(item, { status: "error", error: err.message });
+    }
+    item.controller = null;
+    renderSetup();
   }
+  state.pumping = false;
+  renderSetup();
+}
+
+// Glemmer utkastet (og sletter det på serveren). Filene på maskinen din blir ikke berørt.
+function resetDraft() {
+  state.gen++;
+  for (const u of state.uploads) if (u.controller) u.controller.abort();
+  if (state.job && state.job.status === "draft") discardJob(state.job.id);
+  state.job = null;
+  state.files = [];
+  state.sources.clear();
+  state.creating = null;
+}
+
+function removeUpload(item) {
+  if (item.controller) item.controller.abort();
+  else dropUpload(item);
+  renderSetup();
 }
 
 function retryUpload(item) {
-  item.status = "waiting";
-  item.error = "";
-  render();
+  Object.assign(item, { status: "waiting", error: "" });
+  renderSetup();
   pump();
 }
 
-async function removeFile(file) {
+async function removeFile(file, button) {
+  button.disabled = true;
   try {
-    await api(fileUrl(file), { method: "DELETE" });
-    state.files = state.files.filter((f) => f.id !== file.id);
-    render();
-    await refreshJob();
+    await api(fileUrl(state.job.id, file.id), { method: "DELETE" });
+    state.files = state.files.filter((f) => f !== file);
+    state.sources.delete(file.id);
   } catch (err) {
     showAlert(`Klarte ikke å fjerne ${file.name}. ${err.message}`);
   }
+  renderSetup();
 }
 
-// ---------- Jobb ----------
-
-async function refreshJob() {
-  if (!state.job) return;
-  const id = state.job.id;
-  const data = await api(`/api/jobs/${encodeURIComponent(id)}`);
-  if (!state.job || state.job.id !== id) return;
-  const wasActive = ACTIVE.has(state.job.status);
-  state.job = data.job;
-  state.files = data.files || [];
-  render();
-  if (wasActive && FINAL.has(state.job.status)) {
-    loadHistory();
-    // På mobil ligger ut-kurven langt nede; vis resultatet når det er klart.
-    const ut = document.querySelector(".tray.ut");
-    if (ut.getBoundingClientRect().top > window.innerHeight * 0.6) ut.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
-}
-
-async function startJob() {
-  if (!state.job) return;
-  clearAlert();
-  els.skipped.hidden = true;
-  els.start.disabled = true;
-  try {
-    const { job } = await api(`/api/jobs/${encodeURIComponent(state.job.id)}/start`, { method: "POST" });
-    state.job = job;
-    await refreshJob();
-    schedulePoll();
-    loadHistory();
-  } catch (err) {
-    showAlert(err.message);
-    render();
-  }
-}
-
-async function cancelJob() {
-  if (!state.job) return;
-  const ok = window.confirm("Vil du avbryte oversettelsen?\n\nFiler som allerede er ferdige, kan du fortsatt laste ned.");
+async function clearAll() {
+  const ok = await confirmDialog({
+    title: "Fjerne alle dokumentene fra listen?",
+    text: "Originalene på maskinen din blir ikke berørt.",
+    confirm: "Ja, fjern alle",
+    cancel: "Nei",
+  });
   if (!ok) return;
-  els.cancel.disabled = true;
-  try {
-    const { job } = await api(`/api/jobs/${encodeURIComponent(state.job.id)}/cancel`, { method: "POST" });
-    state.job = job;
-    await refreshJob();
-  } catch (err) {
-    showAlert(`Klarte ikke å avbryte. ${err.message}`);
-  } finally {
-    els.cancel.disabled = false;
-    render();
+  resetDraft();
+  state.uploads = [];
+  $("skipped").hidden = true;
+  renderSetup();
+  $("btn-files").focus();
+}
+
+// ---------- Steg 2: språk ----------
+
+function chooseLanguage(lang) {
+  if (lang === state.lang) return;
+  state.lang = lang;
+  remember(LANGUAGE, lang);
+  if (state.job || state.creating) {
+    // Utkastet er laget for det andre språket: lag et nytt og last opp filene på nytt i bakgrunnen.
+    const again = [
+      ...state.files.map((f) => newUpload(state.sources.get(f.id), f.path)),
+      ...state.uploads.map((u) => newUpload(u.file, u.path)),
+    ].filter((u) => u.file);
+    resetDraft();
+    state.uploads = again;
+    pump();
   }
+  renderSetup();
+}
+
+// ---------- Tegning av steg 1–3 ----------
+
+function uploadText(item) {
+  if (item.status === "error") return item.error;
+  if (item.status === "waiting") return "Venter på å bli lastet opp";
+  return item.pct >= 100 ? "Leser dokumentet …" : `Laster opp … ${item.pct} %`;
+}
+
+function fileRow(file) {
+  const failed = file.status === "failed";
+  return h("li", { class: `file${failed ? " is-failed" : ""}` },
+    extBadge(file.name),
+    h("div", { class: "file-main" },
+      nameLine(file.path || file.name),
+      h("p", { class: "file-meta" }, failed
+        ? file.message || file.error || "Dette dokumentet kan ikke oversettes."
+        : `Klar – tar ${formatDuration(file.estimateSeconds)}`),
+      failed ? h("p", { class: "file-hint" }, "Det blir ikke med i oversettelsen. Du kan fjerne det fra listen.") : null
+    ),
+    h("button", {
+      type: "button", class: "icon-btn", "aria-label": `Fjern ${file.name}`, title: "Fjern",
+      onclick: (e) => removeFile(file, e.currentTarget),
+    }, icon("close"))
+  );
+}
+
+function uploadRow(item) {
+  const error = item.status === "error";
+  item.fill = h("span", { class: "mini-fill" });
+  item.fill.style.transform = `scaleX(${item.pct / 100})`;
+  item.label = h("p", { class: "file-meta" }, uploadText(item));
+  return h("li", { class: `file is-${item.status}` },
+    extBadge(item.path),
+    h("div", { class: "file-main" },
+      nameLine(item.path),
+      item.label,
+      item.status === "uploading" ? h("span", { class: "mini-bar", "aria-hidden": "true" }, item.fill) : null,
+      error ? h("button", { type: "button", class: "btn-link", onclick: () => retryUpload(item) }, "Prøv igjen") : null
+    ),
+    removeButton(baseName(item.path), () => removeUpload(item))
+  );
+}
+
+function renderSetup() {
+  const rows = [...state.files.map(fileRow), ...state.uploads.map(uploadRow)];
+  fill($("file-list"), rows);
+  $("file-list").hidden = !rows.length;
+  $("files-foot").hidden = rows.length < 2;
+
+  for (const input of document.querySelectorAll("input[name=lang]")) input.checked = input.value === state.lang;
+
+  const ready = state.files.filter((f) => f.status === "ready");
+  const busy = state.uploads.some((u) => u.status !== "error");
+  const seconds = ready.reduce((n, f) => n + (f.estimateSeconds || 0), 0);
+  const summary = $("summary");
+  if (busy) fill(summary, "Vent litt mens dokumentene lastes opp …");
+  else if (ready.length) {
+    fill(summary,
+      `${plural(ready.length, "dokument", "dokumenter")} blir oversatt til ${langName(state.lang)}. `,
+      h("strong", null, `Beregnet tid: ${formatDuration(seconds)}`)
+    );
+  } else if (rows.length) fill(summary, "Ingen av dokumentene kan oversettes. Prøv gjerne med andre filer.");
+  else fill(summary, "Legg til minst ett dokument først, så kan du starte.");
+  $("btn-start").disabled = busy || !ready.length || !state.job;
+}
+
+// ---------- Steg 3: start, følg med og avbryt ----------
+
+async function start() {
+  const button = $("btn-start");
+  const error = $("start-error");
+  button.disabled = true;
+  error.hidden = true;
+  try {
+    const { job } = await api(jobUrl(state.job.id, "/start"), { method: "POST" });
+    state.uploads = [];
+    state.sources.clear();
+    state.lastOk = Date.now();
+    state.failures = 0;
+    applyJob(job, state.files);
+    window.scrollTo({ top: 0, behavior: smooth() });
+    $("working-title").focus({ preventScroll: true });
+    schedulePoll();
+  } catch (err) {
+    error.textContent = err.message;
+    error.hidden = false;
+    renderSetup();
+  }
+}
+
+async function refresh() {
+  const id = state.job.id;
+  const mine = ++state.seq;
+  const data = await api(jobUrl(id));
+  // Et eldre svar som kommer sent, skal ikke overskrive et nyere.
+  if (mine < state.applied || !state.job || state.job.id !== id) return;
+  state.applied = mine;
+  state.lastOk = Date.now();
+  state.failures = 0;
+  applyJob(data.job, data.files || []);
 }
 
 function schedulePoll() {
   clearTimeout(state.pollTimer);
   if (!state.job || !ACTIVE.has(state.job.status)) return;
-  const base = document.hidden ? 5000 : 1500;
-  const delay = Math.min(30000, base * 2 ** state.pollFailures);
+  const delay = state.failures
+    ? Math.min(30000, 2000 * 2 ** (state.failures - 1))
+    : document.hidden ? 5000 : 1500;
   state.pollTimer = setTimeout(poll, delay);
 }
 
 async function poll() {
+  if (state.polling || !state.job) return;
+  clearTimeout(state.pollTimer);
+  state.polling = true;
   try {
-    await refreshJob();
-    if (state.pollFailures) clearAlert();
-    state.pollFailures = 0;
+    await refresh();
   } catch (err) {
-    state.pollFailures++;
-    if (state.pollFailures >= 2) {
-      showAlert("Mistet kontakten med serveren.", "Oversettelsen fortsetter på serveren. Vi prøver igjen automatisk.");
+    if (err.status === 404) {
+      jobVanished();
+      return;
     }
+    state.failures++;
+    renderConnection();
+  } finally {
+    state.polling = false;
   }
   schedulePoll();
 }
 
-function resetRound() {
-  clearTimeout(state.pollTimer);
-  state.round++;
-  state.creatingJob = null;
-  for (const item of state.uploads) {
-    item.removed = true;
-    if (item.xhr) item.xhr.abort();
+function jobVanished() {
+  state.job = null;
+  state.files = [];
+  setView("setup");
+  renderSetup();
+  showAlert("Vi finner ikke denne oversettelsen lenger. Den kan ha blitt slettet.");
+}
+
+async function cancel() {
+  const ok = await confirmDialog({
+    title: "Vil du avbryte oversettelsen?",
+    text: "Dokumenter som allerede er ferdige, beholder du under «Mine dokumenter». Resten blir ikke oversatt.",
+    confirm: "Ja, avbryt",
+    cancel: "Nei, fortsett",
+    danger: true,
+  });
+  if (!ok || !state.job || !ACTIVE.has(state.job.status)) return;
+  try {
+    await api(jobUrl(state.job.id, "/cancel"), { method: "POST" });
+    await refresh();
+  } catch (err) {
+    toast(`Klarte ikke å avbryte. ${err.message}`);
   }
+}
+
+function applyJob(job, files) {
+  const wasActive = Boolean(state.job && ACTIVE.has(state.job.status));
+  state.job = job;
+  state.files = files;
+  if (ACTIVE.has(job.status)) {
+    setView("working");
+    renderWorking();
+    return;
+  }
+  setView("done");
+  renderDone();
+  if (wasActive) finished();
+}
+
+function finished() {
+  remember(LAST_VISIT, new Date().toISOString());
+  loadDocuments();
+  const ok = state.job.status === "done" || state.job.status === "partial";
+  if (state.notify && document.hidden && ok) {
+    try {
+      new Notification("Dokumentene dine er ferdige", { body: "InnNorsk er ferdig med oversettelsen.", icon: "/img/icon.png" });
+    } catch {
+      // Enkelte mobilnettlesere tillater bare varsler fra service workers.
+    }
+  }
+  $("done").scrollIntoView({ behavior: smooth(), block: "start" });
+  $("done-title").focus({ preventScroll: true });
+}
+
+function setView(view) {
+  state.view = view;
+  $("setup").hidden = view !== "setup";
+  $("working").hidden = view !== "working";
+  $("done").hidden = view !== "done";
+  clearInterval(state.tickTimer);
+  if (view === "working") {
+    state.tickTimer = setInterval(tick, 1000);
+    tick();
+  } else {
+    state.spoken = "";
+  }
+  if (view === "setup") document.title = TITLE;
+}
+
+// ---------- Arbeidskortet ----------
+
+function etaText(job) {
+  if (job.status === "queued") return "Starter straks …";
+  const eta = job.eta;
+  if (!eta) return "Regner ut hvor lang tid det tar …";
+  if (eta.secondsRemaining < 10) return "Straks ferdig …";
+  return `${formatDuration(eta.secondsRemaining)} igjen – ferdig rundt kl. ${formatClock(eta.finishAt)}`;
+}
+
+const FILE_STATES = {
+  ready: "Venter",
+  queued: "Venter",
+  done: "Ferdig",
+  failed: "Kunne ikke oversettes",
+  cancelled: "Avbrutt",
+};
+
+function workRow(file) {
+  const pct = Math.floor((file.progress && file.progress.percent) || 0);
+  return h("li", { class: `wf is-${file.status}` },
+    h("span", { class: "wf-mark", "aria-hidden": "true" }, file.status === "done" ? icon("check") : null),
+    h("span", { class: "wf-name" }, baseName(file.path || file.name)),
+    h("span", { class: "wf-state" }, file.status === "working" ? `Oversetter … ${pct} %` : FILE_STATES[file.status] || "")
+  );
+}
+
+function announce(text) {
+  if (text === state.spoken) return;
+  state.spoken = text;
+  $("announce").textContent = text;
+}
+
+function renderWorking() {
+  const job = state.job;
+  const running = job.status === "running";
+  const pct = Math.max(0, Math.min(100, Math.floor((job.progress && job.progress.percent) || 0)));
+  const current = job.currentFile;
+  const index = current ? state.files.findIndex((f) => f.id === current.id) + 1 : 0;
+
+  if (!running) fill($("now"), "Dokumentene står i kø og blir tatt straks.");
+  else if (current) {
+    fill($("now"), "Nå: ", h("strong", null, baseName(current.name)),
+      state.files.length > 1 && index ? ` (dokument ${index} av ${state.files.length})` : "");
+  } else fill($("now"), "Gjør klar neste dokument …");
+
+  $("bar").setAttribute("aria-valuenow", String(pct));
+  $("bar-fill").style.transform = `scaleX(${pct / 100})`;
+  $("pct").textContent = `${pct} %`;
+  $("eta").textContent = etaText(job);
+  $("eta-hint").hidden = !(running && job.eta && job.eta.confidence === "lav");
+  fill($("work-files"), state.files.map(workRow));
+  $("work-files").classList.toggle("is-long", state.files.length > 6);
+  $("btn-notify").hidden = state.notify || !("Notification" in window) || Notification.permission === "denied";
+  $("notify-on").hidden = !state.notify;
+  document.title = `(${pct} %) ${TITLE}`;
+  announce(running ? `Oversettelsen er ${Math.floor(pct / 10) * 10} % ferdig.` : "Oversettelsen venter på tur.");
+  renderConnection();
+}
+
+function renderConnection() {
+  // Én bom kan være tilfeldig; først ved to på rad sier vi fra.
+  const lost = state.failures >= 2;
+  $("lost").hidden = !lost;
+  $("heartbeat").classList.toggle("is-lost", lost);
+  tick();
+}
+
+function tick() {
+  $("hb-time").textContent = relativeTime(state.lastOk);
+}
+
+async function enableNotify() {
+  const permission = Notification.permission === "granted" ? "granted" : await Notification.requestPermission();
+  state.notify = permission === "granted";
+  if (!state.notify) toast("Da får du ikke beskjed, men du ser det her på siden når det er ferdig.");
+  if (state.view === "working") renderWorking();
+}
+
+// ---------- Ferdig-kortet ----------
+
+function warningNote(file) {
+  const n = (file.warnings || []).length;
+  if (!n) return null;
+  return h("p", { class: "file-hint" }, n === 1
+    ? "Merk: Én liten tekstbit står fortsatt på originalspråket."
+    : `Merk: ${n} små tekstbiter står fortsatt på originalspråket.`);
+}
+
+function resultRow(job, file) {
+  if (file.status === "done") {
+    const name = baseName(file.outputName || file.name);
+    return h("li", { class: "result" },
+      extBadge(name),
+      h("div", { class: "file-main" },
+        h("p", { class: "file-name" }, name),
+        h("p", { class: "file-meta" }, `${LANGUAGE_LABELS[job.targetLanguage] || ""} · ${formatBytes(file.outputBytes)}`),
+        warningNote(file)
+      ),
+      h("a", {
+        class: "btn btn-primary btn-download", href: fileUrl(job.id, file.id, "/download"), download: "", "aria-label": `Last ned ${name}`,
+      }, icon("download"), "Last ned")
+    );
+  }
+  const why = file.status === "failed"
+    ? file.message || file.error || "Dette dokumentet kunne ikke oversettes."
+    : "Ble ikke oversatt fordi oversettelsen ble avbrutt.";
+  return h("li", { class: "result is-failed" },
+    extBadge(file.name),
+    h("div", { class: "file-main" },
+      h("p", { class: "file-name" }, baseName(file.path || file.name)),
+      h("p", { class: "file-meta" }, why)
+    )
+  );
+}
+
+function renderDone() {
+  const job = state.job;
+  const files = state.files;
+  const done = files.filter((f) => f.status === "done");
+  const lang = langName(job.targetLanguage);
+  const text = {
+    done: [
+      done.length === 1 ? "Ferdig! Dokumentet er oversatt." : "Ferdig! Dokumentene er oversatt.",
+      done.length === 1 ? `Dokumentet er oversatt til ${lang}.` : `Alle ${done.length} dokumentene er oversatt til ${lang}.`,
+    ],
+    partial: [
+      "Nesten alt gikk fint",
+      `${done.length} av ${files.length} dokumenter er oversatt til ${lang}. Under ser du hva som skjedde med resten.`,
+    ],
+    failed: [
+      "Det gikk dessverre ikke denne gangen",
+      job.error || "Ingen av dokumentene kunne oversettes. Under ser du hvorfor.",
+    ],
+    cancelled: [
+      "Oversettelsen ble avbrutt",
+      done.length
+        ? `${plural(done.length, "dokument", "dokumenter")} ble ferdig før du avbrøt, og kan lastes ned.`
+        : "Ingen dokumenter ble ferdige før du avbrøt.",
+    ],
+  }[job.status] || ["Oversettelsen er avsluttet", ""];
+  $("done-title").textContent = text[0];
+  $("done-lead").textContent = text[1];
+  $("done-mark").className = `done-mark is-${job.status}`;
+  const sorted = [...done, ...files.filter((f) => f.status !== "done")];
+  fill($("results"), sorted.map((f) => resultRow(job, f)));
+  const zip = $("zip-link");
+  zip.hidden = done.length < 2;
+  zip.href = jobUrl(job.id, "/download.zip");
+  document.title = done.length && job.status !== "cancelled" ? `✓ Ferdig – ${TITLE}` : TITLE;
+}
+
+function translateMore() {
   state.job = null;
   state.files = [];
   state.uploads = [];
-  els.skipped.hidden = true;
-  clearAlert();
-  render();
+  state.sources.clear();
+  $("skipped").hidden = true;
+  showAlert("");
+  setView("setup");
+  renderSetup();
+  window.scrollTo({ top: 0, behavior: smooth() });
+  $("btn-files").focus({ preventScroll: true });
 }
 
-async function openJob(id, { scroll = true } = {}) {
-  if (state.uploads.some((u) => u.status !== "error")
-    && !window.confirm("Opplastingen du holder på med, blir stoppet. Vil du åpne den andre oversettelsen?")) return;
-  clearAlert();
+// ---------- Mine dokumenter ----------
+
+async function loadDocuments() {
   try {
-    const data = await api(`/api/jobs/${encodeURIComponent(id)}`);
-    resetRound();
-    state.job = data.job;
-    state.files = data.files || [];
-    if (LANGUAGE_LABELS[state.job.targetLanguage]) els.lang.value = state.job.targetLanguage;
-    render();
-    schedulePoll();
-    if (scroll) document.querySelector(".desk").scrollIntoView({ behavior: "smooth", block: "start" });
+    const { documents } = await api("/api/documents");
+    state.documents = documents || [];
   } catch (err) {
-    showAlert(`Klarte ikke å åpne oversettelsen. ${err.message}`);
+    fill($("doc-groups"), h("p", { class: "empty" }, `Klarte ikke å hente dokumentene dine. ${err.message}`));
+    return false;
   }
+  renderDocuments();
+  return true;
 }
 
-// ---------- Tegning ----------
-
-function render() {
-  renderInn();
-  renderPress();
-  renderUt();
-  renderHistory();
+function isNew(doc) {
+  return Boolean(state.lastVisit) && new Date(doc.finishedAt) > new Date(state.lastVisit);
 }
 
-function fileMeta(file) {
-  if (file.status === "failed") return file.error || file.message || "Kunne ikke leses.";
-  const parts = [];
-  if (file.segments != null) parts.push(plural(file.segments, "tekstbit", "tekstbiter"));
-  if (file.chars != null) parts.push(`${formatNumber(file.chars)} tegn`);
-  if (file.estimateSeconds != null) parts.push(formatDuration(file.estimateSeconds));
-  return parts.join(" · ") || formatBytes(file.bytes);
-}
-
-function docName(path) {
-  return h("span", { class: "doc-name" },
-    dirName(path) ? h("span", { class: "doc-dir" }, dirName(path)) : null,
-    baseName(path)
+function docRow(doc) {
+  const name = baseName(doc.name);
+  const original = baseName(doc.originalName || doc.path);
+  return h("li", { class: "doc" },
+    extBadge(name),
+    h("div", { class: "file-main" },
+      h("p", { class: "file-name" }, name, isNew(doc) ? h("span", { class: "pill" }, "Ny") : null),
+      h("p", { class: "file-meta" },
+        [LANGUAGE_LABELS[doc.targetLanguage], `kl. ${formatClock(doc.finishedAt)}`, formatBytes(doc.outputBytes)].filter(Boolean).join(" · ")),
+      original && original !== name ? h("p", { class: "file-meta" }, `Original: ${original}`) : null
+    ),
+    h("div", { class: "doc-actions" },
+      h("a", {
+        class: "btn btn-small btn-primary", href: fileUrl(doc.jobId, doc.fileId, "/download"), download: "", "aria-label": `Last ned ${name}`,
+      }, "Last ned"),
+      h("button", {
+        type: "button", class: "btn-link btn-quiet", "aria-label": `Slett ${name}`, onclick: () => deleteDocument(doc),
+      }, "Slett")
+    )
   );
 }
 
-function renderInn() {
-  const p = phase();
-  const draft = p === "draft";
-  els.btnFiles.disabled = p === "active";
-  els.btnFolder.disabled = p === "active";
-  els.dropzone.classList.toggle("disabled", p === "active");
-  els.dropzone.setAttribute("aria-disabled", String(p === "active"));
-
-  const locked = Boolean(state.job) || state.uploads.length > 0;
-  els.lang.disabled = locked && p !== "final";
-  els.langNote.hidden = !(locked && draft);
-  els.btnRestart.hidden = !(draft && (state.files.length || state.uploads.length));
-
-  const items = [];
-  const files = draft ? state.files : p === "active" ? state.files.filter((f) => IN_PROGRESS_FILE.has(f.status)) : [];
-  for (const file of files) {
-    const working = file.status === "working";
-    const pct = Math.round((file.progress && file.progress.percent) || 0);
-    const hint = draft && file.status === "failed" ? failHint(file) : "";
-    items.push(h("li", { class: `doc ${file.status}` },
-      docName(file.path || file.name),
-      h("span", { class: "doc-meta" },
-        draft ? fileMeta(file) : file.message || (working ? `Oversetter … ${pct} %` : "Venter på tur")),
-      hint ? h("span", { class: "doc-hint" }, hint) : null,
-      working ? h("progress", { max: 100, value: pct, "aria-label": `Fremdrift for ${file.name}` }) : null,
-      draft ? h("button", {
-        type: "button", class: "remove", "aria-label": `Fjern ${file.name}`, title: "Fjern", onclick: () => removeFile(file),
-      }, "×") : null
-    ));
-  }
-  if (draft) {
-    for (const item of state.uploads) {
-      const bar = item.status === "uploading" ? h("progress", { max: 100, value: item.pct, "aria-label": `Opplasting av ${baseName(item.path)}` }) : null;
-      item.bar = bar;
-      items.push(h("li", { class: `doc upload ${item.status}` },
-        docName(item.path),
-        h("span", { class: "doc-meta" },
-          item.status === "error" ? item.error
-            : item.status === "uploading" ? "Laster opp og leser dokumentet …"
-              : "Venter på opplasting"),
-        bar,
-        item.status === "error" ? h("button", { type: "button", class: "retry", onclick: () => retryUpload(item) }, "Prøv igjen") : null,
-        h("button", {
-          type: "button", class: "remove", "aria-label": `Fjern ${baseName(item.path)}`, title: "Fjern", onclick: () => removeUpload(item),
-        }, "×")
-      ));
-    }
-  }
-  if (!items.length) {
-    items.push(h("li", { class: "empty" },
-      p === "draft" ? "Ingen filer ennå. Slipp filer i feltet over, eller trykk «Velg filer»."
-        : p === "active" ? "Alle filene er ferdig behandlet."
-          : "Alt er sendt til ut-kurven. Legg inn nye filer for å starte en ny runde."));
-  }
-  els.inList.replaceChildren(...items);
-}
-
-function renderPress() {
-  const p = phase();
-  const job = state.job;
-  const ready = state.files.filter((f) => f.status === "ready");
-  const uploading = state.uploads.some((u) => u.status !== "error");
-
-  els.overall.hidden = p !== "active";
-  els.cancel.hidden = p !== "active";
-  els.btnNew.hidden = p !== "final";
-  els.start.hidden = p === "final";
-  els.start.classList.toggle("busy", p === "active");
-  els.slipNote.textContent = "";
-
-  if (p === "draft") {
-    const seconds = job && job.estimateSeconds != null
-      ? job.estimateSeconds
-      : ready.reduce((n, f) => n + (f.estimateSeconds || 0), 0);
-    const chars = ready.reduce((n, f) => n + (f.chars || 0), 0);
-    els.slipLabel.textContent = "Estimert tid";
-    els.slipValue.textContent = ready.length ? formatDuration(seconds) : "–";
-    els.slipLine.textContent = ready.length
-      ? `${plural(ready.length, "fil", "filer")} · ${formatNumber(chars)} tegn`
-      : "Legg inn filer, så ser du her hvor lang tid det tar.";
-    if (ready.length && job && job.queueWaitSeconds > 0) {
-      els.slipNote.textContent = `Andre oversettelser er i gang. Din starter om ${formatDuration(job.queueWaitSeconds)}.`;
-    }
-    els.start.disabled = !ready.length || uploading;
-    els.stampSub.textContent = uploading ? "Laster opp …" : ready.length ? "Trykk for å starte" : "Legg inn filer først";
+function renderDocuments() {
+  const docs = state.documents;
+  if (!docs.length) {
+    fill($("doc-groups"), h("div", { class: "empty" },
+      h("p", null, "Her havner dokumentene du oversetter."),
+      h("p", { class: "muted" }, "Du har ingen ennå – de dukker opp her så snart den første oversettelsen er ferdig.")));
     return;
   }
-
-  els.start.disabled = true;
-  const progress = job.progress || {};
-  if (job.status === "queued") {
-    els.slipLabel.textContent = "I kø";
-    els.slipValue.textContent = job.queuePosition > 1 ? `Nr. ${job.queuePosition} i køen` : "Starter snart";
-    els.slipLine.textContent = job.queueWaitSeconds > 0
-      ? `I kø – starter om ${formatDuration(job.queueWaitSeconds)}`
-      : "I kø – starter straks";
-    els.overall.value = 0;
-    els.stampSub.textContent = "Venter i kø";
-    return;
-  }
-  if (job.status === "running") {
-    const pct = Math.max(0, Math.min(100, Math.round(progress.percent || 0)));
-    els.slipLabel.textContent = "Oversetter …";
-    els.slipValue.textContent = `${pct} %`;
-    els.overall.value = pct;
-    const eta = job.eta;
-    els.slipLine.textContent = eta && eta.secondsRemaining != null
-      ? `${formatDuration(eta.secondsRemaining)} igjen · ferdig ca.\u00a0kl.\u00a0${formatClock(eta.finishAt)}`
-      : "Beregner tid …";
-    if (eta && eta.confidence === "lav") els.slipNote.textContent = "(første anslag — blir mer presist underveis)";
-    els.stampSub.textContent = "Stempler …";
-    return;
-  }
-
-  const done = state.files.filter((f) => f.status === "done").length;
-  const total = state.files.length;
-  els.slipLabel.textContent = statusLabel(job.status);
-  els.slipValue.textContent = `${done} av ${total}`;
-  const took = job.startedAt && job.finishedAt
-    ? (new Date(job.finishedAt) - new Date(job.startedAt)) / 1000
-    : null;
-  els.slipLine.textContent = {
-    done: done === 1 ? "Filen er oversatt." : "Alle filene er oversatt.",
-    partial: `${plural(total - done, "fil", "filer")} kunne ikke oversettes. Se ut-kurven.`,
-    failed: job.error || "Ingen filer ble oversatt.",
-    cancelled: "Du avbrøt oversettelsen.",
-  }[job.status] || "";
-  if (took != null) els.slipNote.textContent = `Tok ${formatDuration(took).replace(/^ca\. /, "")}`;
+  const days = groupBy(docs, (d) => startOfDay(new Date(d.finishedAt)));
+  fill($("doc-groups"), [...days.values()].map((dayDocs) => h("section", { class: "day" },
+    h("h3", { class: "day-title" }, formatDay(dayDocs[0].finishedAt)),
+    [...groupBy(dayDocs, (d) => d.jobId).entries()].map(([jobId, jobDocs]) => h("div", { class: "batch" },
+      jobDocs.length > 1 ? h("div", { class: "batch-head" },
+        h("span", null, `${plural(jobDocs.length, "dokument", "dokumenter")} oversatt kl. ${formatClock(jobDocs[0].finishedAt)}`),
+        h("a", { class: "btn btn-small btn-secondary", href: jobUrl(jobId, "/download.zip"), download: "" }, "Last ned alle (.zip)")
+      ) : null,
+      h("ul", { class: "doc-list" }, jobDocs.map(docRow))
+    ))
+  )));
 }
 
-function failHint(file) {
-  const text = `${file.error || ""} ${file.message || ""}`.toLowerCase();
-  if (/skann|ocr|ingen tekst/.test(text)) {
-    return "PDF-en ser ut til å være et bilde av tekst. Den må gjøres om til tekst (OCR) før den kan oversettes.";
-  }
-  if (/api-nøkkel|administrator/.test(text)) return "Dette må ordnes av den som har satt opp InnNorsk. Si fra, så kan du prøve igjen etterpå.";
-  if (phase() === "draft") return "Denne filen blir ikke med i oversettelsen. Du kan fjerne den.";
-  if (file.status === "cancelled") return "";
-  return "Prøv igjen med «Ny oversettelse». Hvis det fortsatt feiler, si fra til den som har satt opp InnNorsk for deg.";
-}
-
-function warningList(file) {
-  const warnings = (file.warnings || []).map((w) => (typeof w === "string" ? w : w.message)).filter(Boolean);
-  if (!warnings.length) return null;
-  if (warnings.length === 1) return h("span", { class: "doc-warn" }, `Merk: ${warnings[0]}`);
-  return h("details", { class: "doc-warn" },
-    h("summary", null, `Merk: ${warnings.length} små merknader`),
-    h("ul", null, warnings.map((w) => h("li", null, w)))
-  );
-}
-
-function renderUt() {
-  const p = phase();
-  const job = state.job;
-  const results = p === "draft" ? [] : state.files.filter((f) => !IN_PROGRESS_FILE.has(f.status));
-  const done = results.filter((f) => f.status === "done");
-  const expired = Boolean(job && job.filesDeleted);
-
-  els.utTitle.textContent = done.length
-    ? `${plural(done.length, "fil klar", "filer klare")} til nedlasting`
-    : p === "active" ? "Kommer straks …"
-      : results.length ? "Ingen filer å laste ned" : "Ingenting her ennå";
-  els.zip.hidden = !(p === "final" && done.length > 1 && !expired);
-  if (!els.zip.hidden) els.zip.href = zipUrl(job.id);
-
-  els.utNote.textContent = expired
-    ? "Filene er slettet fra serveren. Kjør oversettelsen på nytt hvis du trenger dem."
-    : job && job.expiresAt && done.length
-      ? `Filene kan lastes ned frem til ${new Date(job.expiresAt).toLocaleDateString("nb-NO", { day: "numeric", month: "long" })}.`
-      : p === "draft" ? "De norske filene havner her. Originalene dine endres ikke." : "";
-
-  const items = results.map((file) => {
-    if (file.status === "done") {
-      return h("li", { class: "doc done" },
-        docName(file.outputName || file.path || file.name),
-        h("span", { class: "doc-meta" }, `Ferdig${file.outputBytes ? ` · ${formatBytes(file.outputBytes)}` : ""}`),
-        warningList(file),
-        expired ? null : h("a", {
-          class: "paper dl", href: `${fileUrl(file)}/download`, download: "", "aria-label": `Last ned ${baseName(file.outputName || file.name)}`,
-        }, "Last ned")
-      );
-    }
-    const hint = failHint(file);
-    return h("li", { class: `doc ${file.status}` },
-      docName(file.path || file.name),
-      h("span", { class: "doc-meta" },
-        file.status === "cancelled" ? "Avbrutt – ikke oversatt."
-          : `Kunne ikke oversettes: ${file.error || file.message || "ukjent feil"}`),
-      hint ? h("span", { class: "doc-hint" }, hint) : null
-    );
+async function deleteDocument(doc) {
+  const ok = await confirmDialog({
+    title: "Slette dokumentet?",
+    text: `«${baseName(doc.name)}» blir slettet herfra for godt. Originalen på maskinen din blir ikke berørt.`,
+    confirm: "Ja, slett",
+    cancel: "Nei, behold",
+    danger: true,
   });
-  if (!items.length) {
-    items.push(h("li", { class: "empty" },
-      p === "active" ? "Filene dukker opp her etter hvert som de blir ferdige." : "Tomt. Oversatte filer kommer hit."));
-  }
-  els.outList.replaceChildren(...items);
-}
-
-async function loadHistory() {
+  if (!ok) return;
   try {
-    const { jobs } = await api("/api/jobs?limit=20");
-    state.history = jobs || [];
-    renderHistory();
+    await api(fileUrl(doc.jobId, doc.fileId), { method: "DELETE" });
+    state.documents = state.documents.filter((d) => d !== doc);
+    renderDocuments();
+    toast("Dokumentet er slettet.");
+    $("mine").focus({ preventScroll: true });
   } catch (err) {
-    els.history.replaceChildren(h("li", { class: "empty" }, `Klarte ikke å hente tidligere oversettelser. ${err.message}`));
+    toast(`Klarte ikke å slette dokumentet. ${err.message}`);
   }
 }
 
-function renderHistory() {
-  const jobs = state.history.filter((j) => j.status !== "draft" || (state.job && j.id === state.job.id));
-  if (!jobs.length) {
-    els.history.replaceChildren(h("li", { class: "empty" }, "Ingen tidligere oversettelser ennå."));
-    return;
-  }
-  els.history.replaceChildren(...jobs.map((listed) => {
-    const current = Boolean(state.job && state.job.id === listed.id);
-    const job = current ? { ...listed, ...state.job } : listed;
-    const canZip = (job.status === "done" || job.status === "partial") && !job.filesDeleted;
-    return h("li", { class: `history-item${current ? " current" : ""}` },
-      h("button", { type: "button", class: "history-open", onclick: () => openJob(job.id), "aria-current": current ? "true" : null },
-        h("span", { class: "history-date" }, formatDateTime(job.createdAt)),
-        h("span", { class: "history-meta" },
-          `${plural(job.fileCount || 0, "fil", "filer")} · ${LANGUAGE_LABELS[job.targetLanguage] || job.targetLanguage || ""}`),
-        h("span", { class: `badge status-${job.status}` }, statusLabel(job.status))
-      ),
-      canZip ? h("a", { class: "paper quiet zip-small", href: zipUrl(job.id), download: "" }, "Last ned (.zip)")
-        : job.filesDeleted ? h("span", { class: "small-note" }, "Filene er slettet") : null
-    );
-  }));
+function welcomeBack() {
+  const fresh = state.documents.filter(isNew).length;
+  if (!fresh) return;
+  $("welcome-text").textContent = fresh === 1
+    ? "1 dokument er ferdig og klart til nedlasting."
+    : `${fresh} dokumenter er ferdige og klare til nedlasting.`;
+  $("welcome").hidden = false;
 }
 
 // ---------- Bytt passord ----------
@@ -695,28 +784,30 @@ function setupPasswordDialog() {
   const form = $("pw-form");
   const error = $("pw-error");
   const ok = $("pw-ok");
+  const fields = [$("pw-current"), $("pw-new"), $("pw-repeat")];
+  const say = (message) => {
+    error.textContent = message;
+    error.hidden = !message;
+  };
   $("btn-password").addEventListener("click", () => {
     form.reset();
-    error.hidden = true;
+    for (const input of fields) input.type = "password";
+    say("");
     ok.hidden = true;
     dialog.showModal();
   });
-  $("pw-cancel").addEventListener("click", () => dialog.close());
+  $("pw-close").addEventListener("click", () => dialog.close());
+  $("pw-show").addEventListener("change", (e) => {
+    for (const input of fields) input.type = e.target.checked ? "text" : "password";
+  });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    error.hidden = true;
     ok.hidden = true;
-    const current = $("pw-current").value;
-    const next = $("pw-new").value;
-    let message = "";
-    if (!current) message = "Skriv inn passordet du bruker nå.";
-    else if (next.length < 10) message = "Det nye passordet må ha minst 10 tegn.";
-    else if (next !== $("pw-repeat").value) message = "De to nye passordene er ikke like.";
-    if (message) {
-      error.textContent = message;
-      error.hidden = false;
-      return;
-    }
+    const [current, next, repeat] = fields.map((f) => f.value);
+    if (!current) return say("Skriv inn passordet du bruker nå.");
+    if (next.length < 8) return say("Det nye passordet må ha minst 8 tegn.");
+    if (next !== repeat) return say("De to nye passordene er ikke like. Prøv en gang til.");
+    say("");
     const save = $("pw-save");
     save.disabled = true;
     try {
@@ -724,8 +815,7 @@ function setupPasswordDialog() {
       form.reset();
       ok.hidden = false;
     } catch (err) {
-      error.textContent = err.message;
-      error.hidden = false;
+      say(err.message);
     } finally {
       save.disabled = false;
     }
@@ -735,83 +825,100 @@ function setupPasswordDialog() {
 // ---------- Oppstart ----------
 
 function setupInputs() {
-  els.btnFiles.addEventListener("click", () => els.inputFiles.click());
-  els.btnFolder.addEventListener("click", () => els.inputFolder.click());
-  for (const input of [els.inputFiles, els.inputFolder]) {
+  const zone = $("dropzone");
+  $("btn-files").addEventListener("click", () => $("input-files").click());
+  $("btn-folder").addEventListener("click", () => $("input-folder").click());
+  for (const id of ["input-files", "input-folder"]) {
+    const input = $(id);
     input.addEventListener("change", () => {
       addEntries(fromFileList(input.files));
       input.value = "";
     });
   }
+  // Klikk på selve feltet åpner filvelgeren; tastaturbrukere bruker knappene inni.
+  zone.addEventListener("click", (e) => {
+    if (!e.target.closest("button")) $("input-files").click();
+  });
 
-  const zone = els.dropzone;
-  zone.addEventListener("click", () => {
-    if (phase() !== "active") els.inputFiles.click();
+  // Filer kan slippes hvor som helst på siden mens steg 1 vises.
+  const hasFiles = (e) => Boolean(e.dataTransfer) && [...e.dataTransfer.types].includes("Files");
+  let depth = 0;
+  window.addEventListener("dragenter", (e) => {
+    if (!hasFiles(e) || state.view !== "setup") return;
+    depth++;
+    zone.classList.add("is-over");
   });
-  zone.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && phase() !== "active") {
-      e.preventDefault();
-      els.inputFiles.click();
-    }
+  window.addEventListener("dragleave", () => {
+    depth = Math.max(0, depth - 1);
+    if (!depth) zone.classList.remove("is-over");
   });
-  zone.addEventListener("dragover", (e) => {
+  window.addEventListener("dragover", (e) => e.preventDefault());
+  window.addEventListener("drop", async (e) => {
     e.preventDefault();
-    zone.classList.add("over");
-  });
-  zone.addEventListener("dragleave", () => zone.classList.remove("over"));
-  zone.addEventListener("drop", async (e) => {
-    e.preventDefault();
-    zone.classList.remove("over");
+    depth = 0;
+    zone.classList.remove("is-over");
+    if (!hasFiles(e) || state.view !== "setup") return;
     try {
       addEntries(await entriesFromDrop(e.dataTransfer));
-    } catch (err) {
-      showAlert(`Klarte ikke å lese filene du slapp. ${err.message || ""}`, "Prøv heller knappen «Velg filer» eller «Velg mappe».");
+    } catch {
+      showAlert("Klarte ikke å lese filene du slapp. Prøv heller knappen «Velg filer».");
     }
   });
-  // Filer sluppet utenfor feltet skal ikke åpnes i nettleseren.
-  window.addEventListener("dragover", (e) => e.preventDefault());
-  window.addEventListener("drop", (e) => e.preventDefault());
 
-  els.start.addEventListener("click", startJob);
-  els.cancel.addEventListener("click", cancelJob);
-  els.btnNew.addEventListener("click", () => {
-    resetRound();
-    els.dropzone.focus();
-  });
-  els.btnRestart.addEventListener("click", () => {
-    if (window.confirm("Vil du tømme inn-kurven og begynne på nytt?")) resetRound();
-  });
+  for (const input of document.querySelectorAll("input[name=lang]")) {
+    input.addEventListener("change", () => chooseLanguage(input.value));
+  }
+  $("btn-clear").addEventListener("click", clearAll);
+  $("btn-start").addEventListener("click", start);
+  $("btn-cancel").addEventListener("click", cancel);
+  $("btn-retry").addEventListener("click", poll);
+  $("btn-notify").addEventListener("click", enableNotify);
+  $("btn-again").addEventListener("click", translateMore);
   $("btn-logout").addEventListener("click", logout);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden && state.job && ACTIVE.has(state.job.status)) {
-      clearTimeout(state.pollTimer);
-      poll();
-    }
-  });
+  $("welcome-close").addEventListener("click", () => { $("welcome").hidden = true; });
+  $("welcome-go").addEventListener("click", () => { $("welcome").hidden = true; });
+
+  const wake = () => {
+    if (!document.hidden && state.view === "working") poll();
+  };
+  document.addEventListener("visibilitychange", wake);
+  window.addEventListener("online", wake);
+  window.addEventListener("pagehide", () => remember(LAST_VISIT, new Date().toISOString()));
+}
+
+// Fortsett en oversettelse som er i gang, også om siden ble lukket underveis.
+async function resume() {
+  const { jobs } = await api("/api/jobs?limit=10");
+  const active = (jobs || []).find((j) => ACTIVE.has(j.status));
+  if (!active) return;
+  state.lastOk = Date.now();
+  applyJob(active, []);
+  await poll();
 }
 
 async function init() {
   setupInputs();
   setupPasswordDialog();
-  render();
+  renderSetup();
+  let user;
   try {
-    const { user } = await api("/api/auth/me");
-    if (user.mustChangePassword) {
-      location.href = "/login";
-      return;
-    }
-    els.who.textContent = user.displayName || user.username;
-    els.adminLink.hidden = user.role !== "admin";
+    ({ user } = await api("/api/auth/me"));
   } catch (err) {
     showAlert(err.message);
     return;
   }
-  await loadHistory();
-  // Fortsett der brukeren slapp: en pågående eller ustartet runde åpnes igjen.
-  const latest = state.history[0];
-  if (latest && !state.job && (ACTIVE.has(latest.status) || latest.status === "draft")) {
-    await openJob(latest.id, { scroll: false });
+  if (user.mustChangePassword) {
+    location.href = "/login";
+    return;
   }
+  $("hello").textContent = `Hei, ${user.displayName || user.username}!`;
+  $("admin-link").hidden = user.role !== "admin";
+  const [docsLoaded] = await Promise.all([
+    loadDocuments(),
+    resume().catch((err) => showAlert(`Klarte ikke å hente oversettelsen som var i gang. ${err.message}`)),
+  ]);
+  if (docsLoaded) welcomeBack();
+  remember(LAST_VISIT, new Date().toISOString());
 }
 
 init();

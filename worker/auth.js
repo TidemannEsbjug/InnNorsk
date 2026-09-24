@@ -118,12 +118,12 @@ export async function loadSession(c) {
   const id = sha256(token);
   const row = await one(
     c.env,
-    `SELECT s.id, s.last_seen_at, u.* FROM sessions s JOIN users u ON u.id = s.user_id
+    `SELECT s.last_seen_at AS seen_at, u.* FROM sessions s JOIN users u ON u.id = s.user_id
      WHERE s.id = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
     id, nowIso()
   );
   if (!row || row.disabled) return;
-  if (Date.now() - Date.parse(row.last_seen_at || 0) > SLIDE_EVERY_MS) {
+  if (Date.now() - Date.parse(row.seen_at || 0) > SLIDE_EVERY_MS) {
     await run(c.env, "UPDATE sessions SET last_seen_at = ?, expires_at = ? WHERE id = ?", nowIso(), expiresFromNow(c.env), id);
     setSessionCookie(c, token);
   }

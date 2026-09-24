@@ -66,7 +66,7 @@ export function upload(url, blob, { onProgress, signal } = {}) {
     xhr.addEventListener("error", () => reject(Object.assign(new Error("Opplastingen ble brutt. Sjekk internettforbindelsen og prøv igjen."), { status: 0 })));
     xhr.addEventListener("abort", () => reject(new DOMException("Avbrutt", "AbortError")));
     if (signal) {
-      if (signal.aborted) return xhr.abort();
+      if (signal.aborted) return reject(new DOMException("Avbrutt", "AbortError"));
       signal.addEventListener("abort", abort);
     }
     xhr.send(blob);
@@ -85,6 +85,26 @@ export function h(tag, props, ...children) {
   }
   append(node, children);
   return node;
+}
+
+const ICONS = {
+  close: "M6 6l12 12M18 6L6 18",
+  check: "M6 12.5l4 4 8-9",
+  download: "M12 4v11m-5-5l5 5 5-5M5 19.5h14",
+  info: "M12 11v6m0-9.5v.5",
+};
+
+// Liten strekikon (SVG må lages i eget navnerom, derfor ikke via h()).
+export function icon(name) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("class", "icon");
+  const path = document.createElementNS(ns, "path");
+  path.setAttribute("d", ICONS[name]);
+  svg.append(path);
+  return svg;
 }
 
 // Som replaceChildren, men hopper over null/false.
