@@ -2,14 +2,18 @@
   "name": "innnorsk",
   "productName": "InnNorsk",
   "version": "1.2.0",
-  "description": "Oversett dokumenter til norsk med Grok, lokalt på Windows.",
+  "description": "Oversett dokumenter til norsk med Grok — skyapp med innlogging, og lokal Windows-app.",
   "main": "src/main.js",
   "author": "InnNorsk",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
-    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site\"",
-    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site\""
+    "server": "node --disable-warning=ExperimentalWarning server/index.js",
+    "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js",
+    "create-user": "node --disable-warning=ExperimentalWarning server/cli.js create-user",
+    "test": "node --disable-warning=ExperimentalWarning --test --test-concurrency=1 \"test/**/*.test.js\"",
+    "pack:win": "electron-packager . InnNorsk --platform=win32 --arch=x64 --out=dist --overwrite --icon=assets/icon.ico --ignore=\"dist|docs|packaging|site|server|web|test|data|Dockerfile|render.yaml\"",
+    "pack:mac": "electron-packager . InnNorsk --platform=darwin --arch=arm64 --out=dist --overwrite --icon=assets/icon.icns --ignore=\"dist|docs|packaging|site|server|web|test|data|Dockerfile|render.yaml\""
   },
   "dependencies": {
     "express": "^5.2.1",
@@ -22,5 +26,8 @@
   "devDependencies": {
     "electron": "^35.1.5",
     "electron-packager": "^17.1.2"
+  },
+  "engines": {
+    "node": ">=22.13"
   }
 }
