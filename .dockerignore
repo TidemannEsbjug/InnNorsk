@@ -1,0 +1,17 @@
+.git
+.github
+.claude
+node_modules
+dist
+data
+docs
+test
+packaging
+scripts
+site
+assets/*
+!assets/icon.png
+*.log
+.env
+.env.*
+.DS_Store

@@ -15,15 +15,21 @@ async function main() {
   fs.mkdirSync(dist, { recursive: true });
   fs.rmSync(appDir, { recursive: true, force: true });
 
-  for (const name of ["package.json", "src", "LICENSE", "README.md"]) {
+  // Bare det Electron-appen trenger: ikke server/, web/, test/ eller data/.
+  for (const name of ["package-lock.json", "src", "LICENSE", "README.md"]) {
     execSync(`cp -R ${JSON.stringify(path.join(root, name))} ${JSON.stringify(stage)}`);
   }
+  // express brukes bare av skyserveren.
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+  delete pkg.dependencies.express;
+  fs.writeFileSync(path.join(stage, "package.json"), JSON.stringify(pkg, null, 2) + "\n");
   fs.mkdirSync(path.join(stage, "assets"));
   for (const name of ["icon.png", "icon.ico", "icon.icns"]) {
     fs.copyFileSync(path.join(root, "assets", name), path.join(stage, "assets", name));
   }
 
-  execSync("npm install --omit=dev --no-fund --no-audit", { cwd: stage, stdio: "inherit" });
+  // --omit=optional: canvas (valgfri for pdfjs-dist) ville blitt bygget for byggmaskinen, ikke Windows.
+  execSync("npm install --omit=dev --omit=optional --no-fund --no-audit", { cwd: stage, stdio: "inherit" });
 
   const zipPath = await downloadArtifact({
     version,

@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="nb">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin – InnNorsk</title>
+  <link rel="icon" type="image/png" href="/img/icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/app.css" />
+  <script type="module" src="/js/admin.js"></script>
+</head>
+<body>
+  <div class="blotter admin">
+    <header class="topbar">
+      <a class="brand" href="/">
+        <span class="mark" aria-hidden="true"><span class="mark-tray"></span></span>
+        <span>
+          <span class="eyebrow">Administrasjon</span>
+          <span class="wordmark">InnNorsk</span>
+        </span>
+      </a>
+      <nav class="top-actions" aria-label="Konto">
+        <span class="who" id="who"></span>
+        <a class="ghost" href="/">Til oversetteren</a>
+        <button type="button" class="ghost" id="btn-logout">Logg ut</button>
+      </nav>
+    </header>
+
+    <div class="tabs" role="tablist" aria-label="Admin">
+      <button type="button" role="tab" id="tab-oversikt" aria-controls="panel-oversikt">Oversikt</button>
+      <button type="button" role="tab" id="tab-jobber" aria-controls="panel-jobber">Jobber</button>
+      <button type="button" role="tab" id="tab-logg" aria-controls="panel-logg">Logg</button>
+      <button type="button" role="tab" id="tab-okter" aria-controls="panel-okter">Økter</button>
+      <button type="button" role="tab" id="tab-brukere" aria-controls="panel-brukere">Brukere</button>
+    </div>
+
+    <section class="panel" role="tabpanel" id="panel-oversikt" aria-labelledby="tab-oversikt" hidden>
+      <div class="banner danger" id="key-banner" role="alert" hidden>
+        <strong>API-nøkkelen mangler.</strong>
+        Ingen kan oversette før <code>XAI_API_KEY</code> er satt på serveren. Legg den inn i miljøvariablene hos vertstjenesten og start tjenesten på nytt.
+      </div>
+      <div class="cards" id="cards"></div>
+      <div class="split-panels">
+        <article class="sheet">
+          <h2>Tidsestimat</h2>
+          <dl class="facts" id="estimator"></dl>
+        </article>
+        <article class="sheet">
+          <h2>Test API-tilkobling</h2>
+          <p>Sender én liten forespørsel til xAI for å sjekke at nøkkel og modell virker. Dette bruker et lite API-kall.</p>
+          <button type="button" class="paper dark" id="btn-test-api">Test API-tilkobling</button>
+          <p class="result" id="test-result" role="status"></p>
+        </article>
+      </div>
+      <p class="panel-error" hidden></p>
+    </section>
+
+    <section class="panel" role="tabpanel" id="panel-jobber" aria-labelledby="tab-jobber" hidden>
+      <div class="toolbar">
+        <label class="field inline">
+          <span>Bruker</span>
+          <select id="jobs-user"><option value="">Alle brukere</option></select>
+        </label>
+        <button type="button" class="paper quiet" id="jobs-refresh">Oppdater</button>
+      </div>
+      <p class="panel-error" hidden></p>
+      <div class="table-wrap">
+        <table class="data" id="jobs-table">
+          <thead>
+            <tr><th>Tid</th><th>Bruker</th><th>Filer</th><th>Status</th><th>Varighet</th><th>Estimert / faktisk</th><th>Tokens inn / ut</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="drill sheet" id="drill" tabindex="-1" hidden></div>
+    </section>
+
+    <section class="panel" role="tabpanel" id="panel-logg" aria-labelledby="tab-logg" hidden>
+      <form class="toolbar" id="log-filters">
+        <label class="field inline">
+          <span>Nivå</span>
+          <select id="log-level">
+            <option value="">Alle</option>
+            <option value="error">Feil</option>
+            <option value="warn">Advarsel</option>
+            <option value="info">Info</option>
+            <option value="debug">Debug</option>
+          </select>
+        </label>
+        <label class="field inline">
+          <span>Type</span>
+          <select id="log-type"><option value="">Alle typer</option></select>
+        </label>
+        <label class="field inline">
+          <span>Bruker</span>
+          <select id="log-user"><option value="">Alle brukere</option></select>
+        </label>
+        <label class="field inline grow">
+          <span>Fritekst</span>
+          <input type="search" id="log-q" placeholder="Søk i meldinger" />
+        </label>
+        <label class="check">
+          <input type="checkbox" id="log-auto" />
+          <span>Oppdater automatisk (5 s)</span>
+        </label>
+      </form>
+      <p class="panel-error" hidden></p>
+      <div class="table-wrap">
+        <table class="data log" id="log-table">
+          <thead>
+            <tr><th>Tid</th><th>Nivå</th><th>Type</th><th>Melding</th><th>Bruker</th><th>Jobb</th><th>IP</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <button type="button" class="paper quiet more" id="log-more" hidden>Last flere</button>
+    </section>
+
+    <section class="panel" role="tabpanel" id="panel-okter" aria-labelledby="tab-okter" hidden>
+      <div class="toolbar">
+        <label class="check">
+          <input type="checkbox" id="sessions-all" />
+          <span>Vis også utløpte og utloggede økter</span>
+        </label>
+        <button type="button" class="paper quiet" id="sessions-refresh">Oppdater</button>
+      </div>
+      <p class="panel-error" hidden></p>
+      <div class="table-wrap">
+        <table class="data" id="sessions-table">
+          <thead>
+            <tr><th>Bruker</th><th>IP</th><th>Enhet</th><th>Sist aktiv</th><th>Innlogget</th><th>Utløper</th><th><span class="sr-only">Handling</span></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel" role="tabpanel" id="panel-brukere" aria-labelledby="tab-brukere" hidden>
+      <form class="sheet create-user" id="user-form" novalidate>
+        <h2>Ny bruker</h2>
+        <div class="toolbar">
+          <label class="field inline grow">
+            <span>Brukernavn</span>
+            <input type="text" id="new-username" autocomplete="off" autocapitalize="none" spellcheck="false" required />
+          </label>
+          <label class="field inline grow">
+            <span>Visningsnavn</span>
+            <input type="text" id="new-display" autocomplete="off" />
+          </label>
+          <label class="field inline">
+            <span>Rolle</span>
+            <select id="new-role">
+              <option value="user">Bruker</option>
+              <option value="admin">Administrator</option>
+            </select>
+          </label>
+          <button type="submit" class="paper dark" id="new-submit">Opprett bruker</button>
+        </div>
+        <p class="small-note">Et midlertidig passord lages automatisk. Brukeren må lage sitt eget ved første innlogging.</p>
+        <p class="form-error" id="user-error" role="alert" hidden></p>
+      </form>
+      <p class="panel-error" hidden></p>
+      <div class="table-wrap">
+        <table class="data" id="users-table">
+          <thead>
+            <tr><th>Brukernavn</th><th>Visningsnavn</th><th>Rolle</th><th>Status</th><th>Sist innlogget</th><th>Opprettet</th><th><span class="sr-only">Handlinger</span></th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <dialog class="modal" id="secret-dialog" aria-labelledby="secret-title">
+    <div class="modal-body">
+      <h2 id="secret-title">Brukeren er opprettet</h2>
+      <p>Passordet vises <strong>bare nå</strong>. Kopier det eller meldingen under, og send den til brukeren.</p>
+      <div class="secret">
+        <code id="secret-password"></code>
+        <button type="button" class="paper quiet" id="copy-password">Kopier passord</button>
+      </div>
+      <label class="field">
+        <span>Ferdig melding å sende</span>
+        <textarea id="secret-message" rows="7" readonly></textarea>
+      </label>
+      <p class="small-note" id="copy-status" role="status"></p>
+      <div class="row end">
+        <button type="button" class="paper quiet" id="copy-message">Kopier melding</button>
+        <button type="button" class="paper dark" id="secret-close">Ferdig</button>
+      </div>
+    </div>
+  </dialog>
+</body>
+</html>

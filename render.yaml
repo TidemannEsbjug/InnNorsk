@@ -1,0 +1,33 @@
+# Render Blueprint for InnNorsk Sky. Steg for steg: docs/DEPLOY.md
+services:
+  - type: web
+    name: innnorsk
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    region: frankfurt
+    branch: main
+    autoDeployTrigger: commit
+    healthCheckPath: /healthz
+    disk:
+      name: innnorsk-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: XAI_API_KEY
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: XAI_MODEL
+        value: grok-4.6
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "8080"
+      - key: RETENTION_DAYS
+        value: "14"
+      - key: GROK_CONCURRENCY
+        value: "2"
