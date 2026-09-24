@@ -1,23 +1,17 @@
-// Filnavn, filtyper og R2: strømmer opp- og nedlastinger rett mellom forespørselen og R2 (ingen buffering).
+// Filnavn, filtyper og R2: originaler, resultater og mellomlagrede tekstbiter (work/<fileId>/).
 // Nedlastingsnavn kommer alltid fra D1, aldri fra R2-nøklene.
+import core from "../src/core.js";
 import { fail } from "./http.js";
 import { logEvent } from "./log.js";
 
-// Samme liste og regler som SUPPORTED / isIgnoredName i src/core.js. Kjernen importeres ikke her,
-// fordi den drar med seg tunge formatbiblioteker som Workeren ikke trenger.
-export const SUPPORTED = [".docx", ".pptx", ".xlsx", ".pdf", ".txt", ".md", ".csv", ".html", ".htm", ".rtf"];
+export const { SUPPORTED, extOf, isIgnoredName } = core;
 
 export const baseName = (p) => String(p || "").split("/").pop();
 
-export function extOf(name) {
-  const base = baseName(name);
-  const dot = base.lastIndexOf(".");
-  return dot > 0 ? base.slice(dot).toLowerCase() : "";
-}
-
-export function isIgnoredName(name) {
-  const base = baseName(name);
-  return base.startsWith("~$") || base.startsWith(".~lock") || /^(thumbs\.db|desktop\.ini|\.ds_store)$/i.test(base);
+// «Mappe/Søknad.pdf» → «Søknad (norsk).docx».
+export function outputName(relPath, outExt) {
+  const base = baseName(relPath);
+  return `${base.slice(0, base.length - extOf(base).length)} (norsk)${outExt}`;
 }
 
 const MIME = {
@@ -67,15 +61,30 @@ export function contentDisposition(name) {
 
 export const r2Key = (sendingId, fileId, kind) => `s/${sendingId}/${fileId}/${kind}`;
 
+// Workflowens mellomlager for én fil: strings.json og b-<idx>.json per ferdig batch.
+export const workPrefix = (fileId) => `work/${fileId}/`;
+
 const fileKeys = (f) => [r2Key(f.sending_id, f.id, "original"), r2Key(f.sending_id, f.id, "result")];
 
-// Sletter original og resultat for filradene (R2 tar maks 1000 nøkler per kall; manglende nøkler er ok).
-export async function deleteObjects(env, files) {
-  const keys = files.flatMap(fileKeys);
+async function deleteKeys(env, keys) {
   for (let i = 0; i < keys.length; i += 1000) await env.FILES.delete(keys.slice(i, i + 1000));
 }
 
-// Content-Length er påkrevd: da vet vi størrelsen før vi leser noe, og R2 kan ta imot strømmen direkte.
+// Sletter original og resultat for filradene (R2 tar maks 1000 nøkler per kall; manglende nøkler er ok).
+export const deleteObjects = (env, files) => deleteKeys(env, files.flatMap(fileKeys));
+
+export async function deleteWork(env, fileId) {
+  const keys = [];
+  let cursor;
+  do {
+    const page = await env.FILES.list({ prefix: workPrefix(fileId), cursor });
+    keys.push(...page.objects.map((o) => o.key));
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  await deleteKeys(env, keys);
+}
+
+// Content-Length er påkrevd: da vet vi størrelsen før vi leser noe.
 export function contentLength(c) {
   const raw = c.req.header("Content-Length");
   return raw != null && /^\d+$/.test(raw) ? Number(raw) : null;
@@ -88,13 +97,31 @@ export function sizeProblem(length, maxBytes, tooBig) {
   return length === 0 ? [400, "Filen er tom."] : null;
 }
 
+// body: strøm eller bytes. Returnerer antall byte som ble lagret.
+export async function putObject(env, key, name, body) {
+  return (await env.FILES.put(key, body, { httpMetadata: { contentType: mimeOf(name) } })).size;
+}
+
+async function aborted(c, name, err, ctx) {
+  await logEvent(c.env, "warn", "upload.failed", `Opplastingen av ${name} ble avbrutt`, { error: String(err && err.message) }, ctx);
+  return fail(400, "Opplastingen ble avbrutt. Prøv igjen.");
+}
+
 // Strømmer forespørselens kropp til R2 og returnerer antall byte som ble lagret. ctx er loggkonteksten.
 export async function putBody(c, key, name, ctx) {
   try {
-    return (await c.env.FILES.put(key, c.req.raw.body, { httpMetadata: { contentType: mimeOf(name) } })).size;
+    return await putObject(c.env, key, name, c.req.raw.body);
   } catch (err) {
-    await logEvent(c.env, "warn", "upload.failed", `Opplastingen av ${name} ble avbrutt`, { error: String(err && err.message) }, ctx);
-    return fail(400, "Opplastingen ble avbrutt. Prøv igjen.");
+    return aborted(c, name, err, ctx);
+  }
+}
+
+// Hele kroppen i minnet som Buffer uten kopi (størrelsen er sjekket mot Content-Length), for analysen ved opplasting.
+export async function readBody(c, name, ctx) {
+  try {
+    return Buffer.from(await c.req.arrayBuffer());
+  } catch (err) {
+    return aborted(c, name, err, ctx);
   }
 }
 

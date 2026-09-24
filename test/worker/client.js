@@ -1,5 +1,5 @@
 // Liten HTTP-klient for integrasjonstestene: husker innloggingskapselen, setter CSRF-hodet og logger inn
-// som nettleseren gjør (salt → PBKDF2-bevis → login). Med { bearer } er den Mac-agenten i stedet.
+// som nettleseren gjør (salt → PBKDF2-bevis → login).
 const crypto = require("node:crypto");
 const { pbkdf2Proof, ITERATIONS } = require("../../scripts/make-user");
 
@@ -17,7 +17,7 @@ function newSecret(password) {
   return { salt, iterations: ITERATIONS, proof: proofFor(password, salt, ITERATIONS) };
 }
 
-// Venter til fn() gir en sann verdi (f.eks. noe som logges etter svaret via waitUntil) og returnerer den.
+// Venter til fn() gir en sann verdi (f.eks. noe som logges etter svaret via waitUntil, eller en fil som blir ferdig) og returnerer den.
 async function eventually(fn, { timeoutMs = 5000, what = "betingelsen" } = {}) {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
@@ -29,18 +29,16 @@ async function eventually(fn, { timeoutMs = 5000, what = "betingelsen" } = {}) {
 }
 
 class Client {
-  constructor(base, { ip, bearer } = {}) {
+  constructor(base, { ip } = {}) {
     this.base = base;
     this.cookie = null;
     this.ip = ip;
-    this.bearer = bearer;
   }
 
-  async req(method, path, { json, body, headers = {}, csrf = !this.bearer } = {}) {
+  async req(method, path, { json, body, headers = {}, csrf = true } = {}) {
     const h = { ...headers };
     if (this.cookie) h.Cookie = this.cookie;
     if (this.ip) h["CF-Connecting-IP"] = this.ip;
-    if (this.bearer) h.Authorization = `Bearer ${this.bearer}`;
     if (csrf && !["GET", "HEAD"].includes(method)) h["X-InnNorsk"] = "1";
     if (json !== undefined) {
       h["Content-Type"] = "application/json";

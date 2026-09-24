@@ -1,25 +1,31 @@
-// Eierens admin-API mot ekte wrangler dev: oversikt, sendinger, manuell opplasting, status, svar, logg, økter, brukere og enheter.
+// Eierens admin-API mot ekte wrangler dev: enheter, oversikt med xAI-forbruk, sendinger med analyse og Grok-kall,
+// manuell opplasting, status og «sett i kø igjen», test av xAI, svar, logg, økter og brukere.
+// Prisene er ikke satt her, så kostnaden er ukjent (null) og bare tokens vises.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const workerDev = require("../helpers/worker-dev");
-const { Client, newSecret } = require("./client");
+const { Client, newSecret, eventually } = require("./client");
 
 const PHONE = "d4".repeat(32);
 let dev;
 let svetlana;
 let admin;
-let agent;
 
 test.before(async () => {
-  dev = await workerDev.start();
+  dev = await workerDev.start({ vars: { XAI_PRICE_INPUT_PER_M: "", XAI_PRICE_OUTPUT_PER_M: "" } });
   [svetlana, admin] = [await dev.login("svetlana"), await dev.login("eier")];
-  agent = dev.agent();
 });
 
 test.after(async () => {
   if (dev) await dev.stop();
 });
+
+const fileOf = async (id) => (await admin.get("/api/admin/sendings?limit=200")).data.sendings.flatMap((s) => s.files).find((f) => f.id === id);
+const until = (id, status) => eventually(async () => {
+  const f = await fileOf(id);
+  return f.status === status && f;
+}, { timeoutMs: 20000, what: `filen blir ${status}` });
 
 test("enheter: registrer (upsert), list, test-push, slå av ved BadDeviceToken og slett", async () => {
   const none = await admin.post("/api/admin/test-push");
@@ -58,61 +64,132 @@ test("enheter: registrer (upsert), list, test-push, slå av ved BadDeviceToken o
   assert.deepEqual((await admin.get("/api/admin/devices")).data.devices.map((d) => d.token), [PHONE]);
 });
 
-test("oversikt: agent, tellere, lagring, enheter og brukere", async () => {
-  await agent.post("/api/agent/poll", { host: "mac-mini", version: "2.0.0", state: "idle", grokOk: true });
+test("oversikt: xAI-forbruk siste døgn, tellere, lagring, enheter, brukere og estimatmodellen", async () => {
+  const before = (await admin.get("/api/admin/overview")).data;
+  assert.deepEqual(before.translator, {
+    apiKeyConfigured: true, model: "grok-4.6", calls24h: 0, failedCalls24h: 0, tokens24h: { input: 0, output: 0 }, cost24h: null,
+    lastCallAt: null, lastError: null, lastErrorAt: null,
+  });
+  assert.deepEqual(before.estimator, { a: 8, b: 0.006, samples: 0, source: "default" });
+  assert.equal("agent" in before, false);
+
   const sending = await svetlana.send({ "a.txt": "Hello", "b.txt": "Hello!" });
-  await agent.post(`/api/agent/files/${sending.files[0].id}/claim`);
+  await until(sending.files[1].id, "done");
   const { data } = await admin.get("/api/admin/overview");
-  assert.deepEqual(data.agent, { online: true, lastSeenAt: data.agent.lastSeenAt, host: "mac-mini", version: "2.0.0", state: "idle", stateMessage: null, grokOk: true });
-  assert.deepEqual(data.counts, { waiting: 1, working: 1, doneToday: 0, failed: 0 });
-  assert.deepEqual(data.storage, { files: 2, bytes: 11 });
+  const t = data.translator;
+  assert.deepEqual([t.calls24h, t.failedCalls24h, t.cost24h, t.lastError], [2, 0, null, null]);
+  assert.ok(t.tokens24h.input > 0 && t.tokens24h.output > 0, JSON.stringify(t.tokens24h));
+  assert.ok(Date.now() - Date.parse(t.lastCallAt) < 60000);
+  const [tokens] = await dev.sql("SELECT SUM(input_tokens) AS input, SUM(output_tokens) AS output FROM grok_calls");
+  assert.deepEqual(t.tokens24h, tokens);
+  assert.deepEqual(data.counts, { waiting: 0, working: 0, doneToday: 2, failed: 0 });
+  const outputs = (await dev.sql("SELECT SUM(output_bytes) AS n FROM files"))[0].n;
+  assert.deepEqual(data.storage, { files: 4, bytes: 11 + outputs });
   assert.deepEqual(data.devices.map((d) => d.token), [PHONE]);
   assert.equal(data.users, 2);
+  assert.deepEqual(data.estimator, before.estimator, "under 8 kall: standardmodellen (og bufret i 60 s)");
 });
 
-test("sendinger for admin viser brukernavn og tekniske detaljer", async () => {
+test("sendinger for admin: brukernavn, analyse, Grok-forbruk, tid og tekniske detaljer", async () => {
   const { data } = await admin.get("/api/admin/sendings?limit=10");
+  assert.deepEqual(Object.keys(data), ["sendings"]);
   const s = data.sendings[0];
-  assert.equal(s.username, "svetlana");
-  assert.equal(s.displayName, "Svetlana");
-  assert.deepEqual(Object.keys(s.files[0]).filter((k) => ["error", "errorDetails", "attempts", "costUsd", "outputSource", "leaseUntil"].includes(k)).sort(),
-    ["attempts", "costUsd", "error", "errorDetails", "leaseUntil", "outputSource"]);
-  assert.equal(typeof data.agentOnline, "boolean");
+  assert.deepEqual([s.username, s.displayName, s.status], ["svetlana", "Svetlana", "done"]);
+  assert.ok(s.startedAt && s.finishedAt);
+  const f = s.files.find((x) => x.name === "a.txt");
+  assert.deepEqual(
+    [f.status, f.outputName, f.outputSource, f.attempts, f.segments, f.chars, f.batches, f.calls, f.costUsd, f.error],
+    ["done", "a (norsk).txt", "cloud", 1, 1, 5, 1, 1, null, null]
+  );
+  assert.ok(f.inputTokens > 0 && f.outputTokens > 0);
+  assert.ok(f.estimateSeconds > 0 && f.durationSeconds >= 0);
+  assert.equal("leaseUntil" in f, false);
+  const [event] = await dev.sql("SELECT data_json FROM events WHERE type = 'sending.done' AND sending_id = ?", s.id);
+  const stats = JSON.parse(event.data_json);
+  assert.deepEqual({ ...stats, estimateSeconds: 0, actualSeconds: 0, inputTokens: 0, outputTokens: 0 },
+    { estimateSeconds: 0, actualSeconds: 0, files: 2, done: 2, failed: 0, calls: 2, inputTokens: 0, outputTokens: 0, costUsd: null });
+  assert.ok(stats.estimateSeconds > 0 && stats.actualSeconds >= 0 && stats.inputTokens > 0);
+});
+
+test("Grok-kallene for en fil, nyeste først, bare for admin", async () => {
+  const s = (await admin.get("/api/admin/sendings?limit=1")).data.sendings[0];
+  const id = s.files[0].id;
+  const res = await admin.get(`/api/admin/files/${id}/calls`);
+  assert.equal(res.status, 200);
+  const [call] = res.data.calls;
+  assert.equal(res.data.calls.length, 1);
+  assert.deepEqual(
+    [call.model, call.status, call.ok, call.attempt, call.items, call.costUsd, call.error, call.reasoningTokens],
+    ["grok-4.6", 200, true, 1, 1, null, null, null]
+  );
+  assert.ok(call.inputChars > 0 && call.outputChars > 0 && call.ms >= 0 && call.inputTokens > 0 && call.outputTokens > 0 && call.ts);
+  assert.match(dev.xai.state.requests[0].input, /Du er en profesjonell oversetter til norsk bokmål\./);
+  assert.equal((await svetlana.get(`/api/admin/files/${id}/calls`)).status, 403);
+  assert.equal((await admin.get("/api/admin/files/finnesikke/calls")).status, 404);
 });
 
 test("manuell opplasting av oversettelse gjør filen ferdig, og Svetlana kan laste den ned", async () => {
-  const sending = await svetlana.send({ "manuell.docx": "original" });
+  const draft = await svetlana.newSending();
+  const unsent = (await svetlana.upload(draft.id, "utkast.txt", "Hello")).data.file;
+  assert.equal((await admin.put(`/api/admin/files/${unsent.id}/result?name=x.txt`, "x")).status, 409, "ikke sendt ennå");
+  const sending = await svetlana.send({ "manuell.txt": "original" });
   const id = sending.files[0].id;
-  const res = await admin.put(`/api/admin/files/${id}/result?name=${encodeURIComponent("manuell (norsk).docx")}`, "håndlaget");
+  await until(id, "done");
+  const res = await admin.put(`/api/admin/files/${id}/result?name=${encodeURIComponent("manuell (norsk).txt")}`, "håndlaget");
   assert.equal(res.status, 200, JSON.stringify(res.data));
   const file = res.data.sending.files[0];
-  assert.deepEqual([file.status, file.outputSource, file.outputName], ["done", "manual", "manuell (norsk).docx"]);
+  assert.deepEqual([file.status, file.outputSource, file.outputName], ["done", "manual", "manuell (norsk).txt"]);
   assert.equal(res.data.sending.status, "done");
   assert.equal((await svetlana.get(`/api/files/${id}/result`)).data.toString(), "håndlaget");
   assert.equal((await svetlana.put(`/api/admin/files/${id}/result?name=x.docx`, "x")).status, 403);
 });
 
-test("status: sett i kø igjen, merk som feilet med melding til Svetlana, og ferdig bare med resultat", async () => {
+test("status: feilet med melding til Svetlana, sett i kø igjen (ny Workflow-instans), og ferdig bare med resultat", async () => {
   const sending = await svetlana.send({ "status.txt": "Hello" });
   const id = sending.files[0].id;
+  await until(id, "done");
   const failed = await admin.post(`/api/admin/files/${id}/status`, { status: "failed", message: "Dette er et skannet bilde – send gjerne originalen." });
   assert.equal(failed.status, 200);
   assert.equal(failed.data.sending.status, "done", "alle filer ferdige");
-  const mine = (await svetlana.get(`/api/sendings/${sending.id}`)).data.sending.files[0];
-  assert.equal(mine.statusText, "Dette er et skannet bilde – send gjerne originalen.");
-  assert.equal((await admin.post(`/api/admin/files/${id}/status`, { status: "done" })).status, 409, "ingen oversettelse ennå");
+  const mine = async () => (await svetlana.get(`/api/sendings/${sending.id}`)).data.sending;
+  assert.equal((await mine()).files[0].statusText, "Dette er et skannet bilde – send gjerne originalen.");
   assert.equal((await admin.post(`/api/admin/files/${id}/status`, { status: "working" })).status, 400);
 
+  const calls = dev.xai.state.calls;
   const requeued = await admin.post(`/api/admin/files/${id}/status`, { status: "sent" });
+  assert.equal(requeued.status, 200);
   assert.equal(requeued.data.sending.status, "sent", "sendingen er åpen igjen");
-  assert.ok((await agent.post("/api/agent/poll", {})).data.files.some((f) => f.id === id), "agenten ser filen igjen");
-  await agent.post(`/api/agent/files/${id}/claim`);
-  await agent.put(`/api/agent/files/${id}/result?name=status.txt`, "Hei");
+  assert.equal((await dev.sql("SELECT workflow_id FROM sendings WHERE id = ?", sending.id))[0].workflow_id, `${sending.id}-2`);
+  const again = await until(id, "done");
+  assert.deepEqual([again.attempts, again.outputSource, again.outputName, again.error], [2, "cloud", "status (norsk).txt", null]);
+  assert.equal(dev.xai.state.calls, calls + 1, "oversatt på nytt");
+  assert.equal((await mine()).status, "done");
+
   await admin.post(`/api/admin/files/${id}/status`, { status: "failed" });
+  assert.equal((await mine()).files[0].statusText, "Kunne ikke oversettes. Jonas har fått beskjed.");
   const done = await admin.post(`/api/admin/files/${id}/status`, { status: "done" });
   assert.equal(done.data.sending.files[0].status, "done", "har resultat → kan merkes ferdig");
   const [event] = await dev.sql("SELECT message, source FROM events WHERE type = 'file.status_changed' ORDER BY id DESC LIMIT 1");
-  assert.equal(event.message, "status.txt: failed → done");
+  assert.deepEqual([event.message, event.source], ["status.txt: failed → done", "web"]);
+
+  const draft = await svetlana.newSending();
+  const unreadable = (await svetlana.upload(draft.id, "skadet.docx", "ikke zip")).data.file;
+  assert.equal((await admin.post(`/api/admin/files/${unreadable.id}/status`, { status: "sent" })).status, 409, "utkast kan ikke settes i kø");
+});
+
+test("«Test xAI»: ett lite kall med serverens nøkkel, maks ett i minuttet, logges uten fil (utenfor estimatet)", async () => {
+  assert.equal((await svetlana.post("/api/admin/test-api")).status, 403);
+  const res = await admin.post("/api/admin/test-api");
+  assert.equal(res.status, 200);
+  assert.deepEqual([res.data.ok, res.data.sample], [true, "OK"]);
+  assert.ok(res.data.ms >= 0);
+  const again = await admin.post("/api/admin/test-api");
+  assert.deepEqual([again.status, again.data.error], [429, "Vent et minutt før du tester igjen."]);
+  const [event] = await dev.sql("SELECT level, message, data_json FROM events WHERE type = 'admin.test_api'");
+  assert.equal(event.level, "info");
+  assert.equal(JSON.parse(event.data_json).model, "grok-4.6");
+  const [call] = await dev.sql("SELECT sending_id, file_id, ok FROM grok_calls ORDER BY id DESC LIMIT 1");
+  assert.deepEqual(call, { sending_id: null, file_id: null, ok: 1 });
 });
 
 test("svar til Svetlana vises på sendingen hennes", async () => {
@@ -130,10 +207,10 @@ test("logg: filtrer på nivå, type (prefiks), kilde og tekst, og bla bakover", 
   const auth = await get("type=auth.&limit=500");
   assert.ok(auth.events.every((e) => e.type.startsWith("auth.")));
   assert.ok(auth.events.some((e) => e.type === "auth.login" && e.username === "eier"));
-  const exact = await get("type=file.claimed");
-  assert.ok(exact.events.length > 0 && exact.events.every((e) => e.type === "file.claimed" && e.source === "agent"));
-  assert.ok((await get("source=agent&limit=500")).events.every((e) => e.source === "agent"));
-  const text = await get(`q=${encodeURIComponent("manuell.docx")}`);
+  const exact = await get("type=file.started");
+  assert.ok(exact.events.length > 0 && exact.events.every((e) => e.type === "file.started" && e.source === "system"));
+  assert.ok((await get("source=system&limit=500")).events.every((e) => e.source === "system"));
+  const text = await get(`q=${encodeURIComponent("manuell.txt")}`);
   assert.ok(text.events.some((e) => e.type === "file.uploaded"));
   assert.deepEqual((await get(`q=${encodeURIComponent("100%_")}`)).events, [], "% og _ er vanlige tegn i søket");
 

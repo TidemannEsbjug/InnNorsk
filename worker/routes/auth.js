@@ -9,16 +9,12 @@ import {
   newSecret, safeEqual, sha256hex, normalizeUsername, recentFailures, isThrottled, reachesThrottle, recordFailure,
   clearUserFailures, revokeUserSessions,
 } from "../auth.js";
+import { translatorName } from "../sendings.js";
 
 const TOO_MANY = "For mange mislykkede forsøk. Vent 15 minutter og prøv igjen.";
 const WRONG = "Brukernavnet eller passordet stemmer ikke.";
 // Ukjent bruker sammenlignes mot denne, så svaret tar like lang tid.
 const NO_USER = "0".repeat(64);
-
-async function translatorName(env) {
-  const row = await one(env, "SELECT display_name, username FROM users WHERE role = 'admin' ORDER BY id LIMIT 1");
-  return row ? row.display_name || row.username : "oversetteren";
-}
 
 const auth = new Hono();
 

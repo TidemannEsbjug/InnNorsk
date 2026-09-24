@@ -1,6 +1,5 @@
-// Innlogging uten passordhashing på serveren (Free-plan: ≤ 10 ms CPU):
-// klienten regner ut proof = PBKDF2-SHA256(passord, salt, iterations), vi lagrer og sammenligner bare sha256(proof).
-// Her er også økter i D1, innloggingsbrems, rolle-sjekker og agentnøkkelen.
+// Innlogging uten passordhashing på serveren: klienten regner ut proof = PBKDF2-SHA256(passord, salt, iterations),
+// vi lagrer og sammenligner bare sha256(proof). Her er også økter i D1, innloggingsbrems og rolle-sjekker.
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { getCookie, setCookie } from "hono/cookie";
 import { one, all, run, batch, nowIso, isoAgo, DAY_MS } from "./db.js";
@@ -138,16 +137,6 @@ export function requireAdmin(c, next) {
   const user = c.get("user");
   if (user && user.role !== "admin") return c.json({ error: "Du har ikke tilgang til dette." }, 403);
   return requireUser(c, next);
-}
-
-// Mac-agenten: Authorization: Bearer <AGENT_TOKEN>.
-export async function requireAgent(c, next) {
-  const header = c.req.header("Authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
-  if (!c.env.AGENT_TOKEN || !token || !safeEqual(token, c.env.AGENT_TOKEN)) {
-    return c.json({ error: "Ugyldig agentnøkkel." }, 401);
-  }
-  await next();
 }
 
 // ---- Innloggingsbrems ----

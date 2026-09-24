@@ -34,7 +34,7 @@
       <img class="hero-art" src="/img/brev.svg" alt="" width="240" height="180" />
       <div>
         <h1 id="hello">Hei!</h1>
-        <p class="lead" id="hello-lead">Her sender du dokumenter som skal oversettes til norsk.</p>
+        <p class="lead" id="hello-lead">Her blir dokumentene dine oversatt til norsk – med samme skrift og oppsett som originalen.</p>
       </div>
     </section>
 
@@ -47,7 +47,7 @@
 
     <section class="card rise" id="send-card" aria-labelledby="send-title">
       <div id="compose">
-        <h2 class="card-title" id="send-title">Send dokumenter</h2>
+        <h2 class="card-title" id="send-title">Oversett dokumenter</h2>
 
         <div class="drop" id="drop">
           <p class="drop-title">Slipp filene her, eller velg dem</p>
@@ -63,7 +63,7 @@
 
         <div class="notice notice-soft" id="skipped" role="status" hidden></div>
 
-        <ul class="queue" id="queue" aria-label="Filer som skal sendes"></ul>
+        <ul class="queue" id="queue" aria-label="Filene som skal oversettes"></ul>
 
         <div class="compose-more" id="compose-more" hidden>
           <fieldset class="langs">
@@ -79,22 +79,23 @@
           </fieldset>
 
           <div class="field">
-            <label for="note" id="note-label">Melding (valgfritt)</label>
-            <textarea id="note" rows="3" maxlength="1000" placeholder="For eksempel: Det haster ikke, eller: Bare side 2 er viktig."></textarea>
+            <label for="note" id="note-label">Melding til oversetteren (valgfritt)</label>
+            <textarea id="note" rows="2" maxlength="1000" placeholder="For eksempel: Dette er til legetimen på fredag."></textarea>
           </div>
 
-          <p class="form-error" id="send-error" role="alert" hidden></p>
-          <p class="send-summary" id="summary" aria-live="polite"></p>
-          <button type="button" class="btn btn-primary btn-big" id="btn-send" disabled>Send</button>
+          <div class="notice send-error" id="send-error" role="alert" hidden></div>
+          <div class="estimate" id="summary" aria-live="polite"></div>
+          <button type="button" class="btn btn-primary btn-big" id="btn-send" disabled>Oversett til norsk</button>
         </div>
       </div>
 
       <div class="thanks" id="thanks" hidden>
         <img class="thanks-art" src="/img/sendt.svg" alt="" width="240" height="160" />
-        <h2 id="thanks-title" tabindex="-1">Takk! Filene er sendt.</h2>
-        <p class="lead" id="thanks-lead"></p>
-        <p class="reassure">Du kan trygt lukke siden. Når oversettelsen er klar, finner du den her under «Mine filer».</p>
-        <button type="button" class="btn btn-secondary" id="btn-more">Send flere filer</button>
+        <h2 id="thanks-title" tabindex="-1">Oversettelsen er i gang</h2>
+        <p class="lead" id="thanks-lead" hidden></p>
+        <p class="thanks-skipped" id="thanks-skipped" hidden></p>
+        <p class="reassure">Du kan trygt lukke siden. De ferdige dokumentene dukker opp her under «Mine filer».</p>
+        <button type="button" class="btn btn-secondary" id="btn-more">Oversett flere filer</button>
       </div>
     </section>
 

@@ -49,9 +49,14 @@ export async function api(path, { method = "GET", body } = {}) {
 }
 
 // Rå filopplasting med fremdrift (fetch kan ikke rapportere hvor langt opplastingen har kommet).
-export function upload(url, blob, { onProgress } = {}) {
+// signal (AbortSignal) avbryter opplastingen; da avvises løftet med err.aborted = true.
+export function upload(url, blob, { onProgress, signal } = {}) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    if (signal) {
+      if (signal.aborted) return reject(Object.assign(new Error("Avbrutt."), { status: 0, aborted: true }));
+      signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
     xhr.open("PUT", url);
     xhr.setRequestHeader("X-InnNorsk", "1");
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
@@ -65,6 +70,7 @@ export function upload(url, blob, { onProgress } = {}) {
       else reject(failure(xhr.status, data));
     });
     xhr.addEventListener("error", () => reject(Object.assign(new Error("Opplastingen ble brutt. Sjekk internettforbindelsen og prøv igjen."), { status: 0 })));
+    xhr.addEventListener("abort", () => reject(Object.assign(new Error("Avbrutt."), { status: 0, aborted: true })));
     xhr.send(blob);
   });
 }
@@ -164,6 +170,7 @@ const ICONS = {
   trash: "M5 7h14M10 7V5h4v2m-7 0l1 12h8l1-12",
   heart: "M12 19s-7-4.5-7-9.5A3.8 3.8 0 0 1 12 7a3.8 3.8 0 0 1 7 2.5c0 5-7 9.5-7 9.5z",
   refresh: "M19 12a7 7 0 1 1-2.1-5M19 4v4h-4",
+  clock: "M12 7.5V12l3 2M12 20.5a8.5 8.5 0 1 1 0-17 8.5 8.5 0 0 1 0 17z",
 };
 
 // Liten strekikon (SVG må lages i eget navnerom, derfor ikke via h()).
@@ -234,6 +241,15 @@ export function formatDuration(seconds) {
   if (minutes < 60) return `ca. ${minutes} min`;
   const rest = minutes % 60;
   return `ca. ${Math.floor(minutes / 60)} t${rest ? ` ${rest} min` : ""}`;
+}
+
+// Målt tid, mer presist: "48 s", "2 min 41 s", "1 t 5 min".
+export function formatSeconds(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (s < 60) return `${s} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} min${s % 60 ? ` ${s % 60} s` : ""}`;
+  const minutes = Math.round(s / 60);
+  return `${Math.floor(minutes / 60)} t${minutes % 60 ? ` ${minutes % 60} min` : ""}`;
 }
 
 const pad = (n) => String(n).padStart(2, "0");

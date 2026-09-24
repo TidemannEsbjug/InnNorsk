@@ -38,7 +38,26 @@
 
     <section class="panel" role="tabpanel" id="panel-oversikt" aria-labelledby="tab-oversikt" tabindex="-1" hidden>
       <div class="notice notice-error panel-error" role="alert" hidden></div>
-      <article class="card agent" id="agent" aria-live="polite"></article>
+      <div class="notice notice-error key-banner" id="key-banner" role="alert" hidden>
+        <p><strong>API-nøkkelen til xAI mangler.</strong> Svetlana kan ikke starte oversettelser før den er satt – hun får beskjed om å si fra til deg.</p>
+        <p>Kjør <code>npx wrangler secret put XAI_API_KEY</code> i prosjektmappen og lim inn nøkkelen. Den må ha tilgang til chat/modeller, ikke bare tale.</p>
+      </div>
+      <article class="card xai" id="translator" aria-labelledby="translator-title">
+        <div class="card-head">
+          <div class="status-head" id="translator-head">
+            <span class="status-dot" aria-hidden="true"></span>
+            <div>
+              <h2 id="translator-title">Oversetter (xAI)</h2>
+              <p class="muted small" id="translator-state">Henter status …</p>
+            </div>
+          </div>
+          <button type="button" class="btn btn-secondary btn-small" id="btn-test-api">Test API-tilkobling</button>
+        </div>
+        <p class="test-result" id="test-api-result" role="status" hidden></p>
+        <dl class="facts" id="translator-facts"></dl>
+        <div class="last-error" id="translator-error" hidden></div>
+        <p class="muted small estimator" id="estimator"></p>
+      </article>
       <div class="stats" id="stats"></div>
       <article class="card">
         <div class="card-head">
@@ -77,9 +96,8 @@
           <select id="log-source">
             <option value="">Alle</option>
             <option value="web">Nettside</option>
-            <option value="agent">Mac</option>
+            <option value="system">System og oversetter</option>
             <option value="ios">iPhone</option>
-            <option value="system">System</option>
           </select>
         </label>
         <label class="field-inline">
@@ -99,17 +117,21 @@
         <option value="auth."></option>
         <option value="file."></option>
         <option value="sending."></option>
+        <option value="admin."></option>
         <option value="push."></option>
-        <option value="agent."></option>
         <option value="user."></option>
         <option value="auth.login"></option>
         <option value="auth.login_failed"></option>
+        <option value="file.uploaded"></option>
+        <option value="file.started"></option>
+        <option value="file.done"></option>
+        <option value="file.warning"></option>
+        <option value="file.failed"></option>
+        <option value="file.status_changed"></option>
         <option value="sending.sent"></option>
         <option value="sending.done"></option>
-        <option value="file.claimed"></option>
-        <option value="file.done"></option>
-        <option value="file.failed"></option>
-        <option value="file.released"></option>
+        <option value="sending.deleted"></option>
+        <option value="admin.test_api"></option>
         <option value="push.sent"></option>
         <option value="push.failed"></option>
         <option value="client.error"></option>

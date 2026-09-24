@@ -6,7 +6,6 @@ import { logEvent } from "./log.js";
 import authRoutes from "./routes/auth.js";
 import sendingRoutes from "./routes/sendings.js";
 import adminRoutes from "./routes/admin.js";
-import agentRoutes from "./routes/agent.js";
 import clientLogRoutes from "./routes/clientlog.js";
 
 const CSP = [
@@ -19,8 +18,6 @@ const CSP = [
   "base-uri 'none'",
   "form-action 'self'",
 ].join("; ");
-
-const isAgentApi = (path) => path.startsWith("/api/agent/");
 
 const app = new Hono();
 
@@ -43,30 +40,29 @@ app.onError(async (err, c) => {
     method: c.req.method,
     path: c.req.path,
     stack: String(err.stack || "").slice(0, 4000),
-  }, isAgentApi(c.req.path) ? { source: "agent" } : reqCtx(c));
+  }, reqCtx(c));
   return c.json({ error: "Noe gikk galt på serveren. Feilen er logget." }, 500);
 });
 
 app.get("/healthz", (c) => c.json({ ok: true }));
 
-// Økten trengs bare for API-et (ikke agentens) og de beskyttede sidene, ikke for css/js/bilder.
+// Økten trengs bare for API-et og de beskyttede sidene, ikke for css/js/bilder.
 const withSession = async (c, next) => {
-  if (!isAgentApi(c.req.path)) await loadSession(c);
+  await loadSession(c);
   await next();
 };
 app.use("/api/*", withSession);
 for (const page of ["/", "/login", "/admin"]) app.use(page, withSession);
 
-// CSRF: nettlesere kan ikke sette egne hoder på tvers av domener uten CORS. Agenten bruker Bearer-nøkkel i stedet.
+// CSRF: nettlesere kan ikke sette egne hoder på tvers av domener uten CORS.
 app.use("/api/*", async (c, next) => {
-  if (!["GET", "HEAD"].includes(c.req.method) && !isAgentApi(c.req.path) && c.req.header("X-InnNorsk") !== "1") {
+  if (!["GET", "HEAD"].includes(c.req.method) && c.req.header("X-InnNorsk") !== "1") {
     return c.json({ error: "Forespørselen ble avvist av sikkerhetshensyn. Last inn siden på nytt." }, 403);
   }
   await next();
 });
 
 app.route("/api/auth", authRoutes);
-app.route("/api/agent", agentRoutes);
 app.route("/api/admin", adminRoutes);
 app.route("/api/client-log", clientLogRoutes);
 app.route("/api", sendingRoutes);

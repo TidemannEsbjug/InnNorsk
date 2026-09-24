@@ -23,8 +23,14 @@ test("filstier fra nettleseren blir trygge relative stier", async () => {
   assert.equal(isIgnoredName("rapport.docx"), false);
   assert.equal(extOf("A/B.DOCX"), ".docx");
   assert.equal(extOf(".bashrc"), "");
-  const core = require("../../src/core");
-  assert.deepEqual([...SUPPORTED].sort(), [...core.SUPPORTED].sort(), "samme filtyper som kjernen");
+  assert.deepEqual([...SUPPORTED].sort(), [".csv", ".docx", ".htm", ".html", ".md", ".pdf", ".pptx", ".rtf", ".txt", ".xlsx"]);
+});
+
+test("navnet på oversettelsen: «<navn> (norsk)» med kjernens utformat, uten mappe", async () => {
+  const { outputName } = await load("files.js");
+  assert.equal(outputName("Søknader/Søknad æøå.docx", ".docx"), "Søknad æøå (norsk).docx");
+  assert.equal(outputName("skann.v2.pdf", ".docx"), "skann.v2 (norsk).docx");
+  assert.equal(outputName("notat.TXT", ".txt"), "notat (norsk).txt");
 });
 
 test("Content-Disposition har ASCII-reserve og UTF-8-navn (æøå og emoji)", async () => {
@@ -43,34 +49,84 @@ test("statustekstene Svetlana ser", async () => {
   assert.equal(formatDuration(3900), "ca. 1 t 5 min");
   assert.equal(formatDuration(7200), "ca. 2 t");
   const now = new Date().toISOString();
-  assert.equal(statusText({ status: "draft" }, true), "Ikke sendt ennå");
-  assert.equal(statusText({ status: "sent" }, true), "Mottatt – oversettes snart");
-  assert.equal(statusText({ status: "sent" }, false), "Mottatt – oversettelsen starter når oversetteren er klar");
-  assert.equal(statusText({ status: "working" }, true), "Oversettes nå");
+  assert.equal(statusText({ status: "draft", estimate_seconds: 170 }), "Klar – ca. 3 min");
+  assert.equal(statusText({ status: "draft", estimate_seconds: 12 }), "Klar – under 1 min");
+  assert.equal(statusText({ status: "draft", estimate_seconds: null }), "Klar");
+  assert.equal(statusText({ status: "sent" }), "I kø – starter straks");
+  assert.equal(statusText({ status: "working" }), "Oversettes nå");
   assert.equal(
-    statusText({ status: "working", progress_percent: 44.6, eta_seconds: 185, progress_at: now }, true),
+    statusText({ status: "working", progress_percent: 44.6, eta_seconds: 185, progress_at: now }),
     "Oversettes nå – 45 % – ca. 3 min igjen"
   );
   const minuteAgo = new Date(Date.now() - 60000).toISOString();
   assert.equal(
-    statusText({ status: "working", progress_percent: 90, eta_seconds: 70, progress_at: minuteAgo }, true),
+    statusText({ status: "working", progress_percent: 90, eta_seconds: 70, progress_at: minuteAgo }),
     "Oversettes nå – 90 % – under 1 min igjen",
     "gjenstående tid telles ned fra forrige fremdriftsmelding"
   );
-  assert.equal(statusText({ status: "done" }, false), "Ferdig");
-  assert.equal(statusText({ status: "failed" }, true), "Oversetteren ser på denne filen");
-  assert.equal(statusText({ status: "failed", message: "Denne PDF-en er skannet." }, true), "Denne PDF-en er skannet.");
+  assert.equal(statusText({ status: "done" }), "Ferdig");
+  assert.equal(statusText({ status: "failed" }, "Jonas"), "Kunne ikke oversettes. Jonas har fått beskjed.");
+  assert.equal(statusText({ status: "failed", message: "Denne PDF-en er et bilde uten tekst og kan ikke oversettes." }, "Jonas"),
+    "Denne PDF-en er et bilde uten tekst og kan ikke oversettes.", "vennlig forklaring fra analysen");
+});
+
+test("estimatet: standardmodell, tilpasning fra Grok-kall, steg à 4 batcher og live-justering", async () => {
+  const { fitParams, predictFile, predictSending, liveEta, makespan, DEFAULT_PARAMS } = await load("estimate.js");
+  assert.deepEqual(fitParams([]), { a: 8, b: 0.006, samples: 0, source: "default" });
+  assert.equal(fitParams(Array.from({ length: 7 }, () => ({ input_chars: 1000, ms: 5000 }))).source, "default", "under 8 kall");
+
+  // 40 kall som følger t = 2 + 0,001·tegn nøyaktig: vektet 40/60 mot standardverdiene.
+  const rows = Array.from({ length: 40 }, (_, i) => ({ input_chars: 1000 + i * 150, ms: (2 + 0.001 * (1000 + i * 150)) * 1000 }));
+  const fit = fitParams(rows);
+  assert.equal(fit.source, "fitted");
+  assert.equal(fit.samples, 40);
+  assert.ok(Math.abs(fit.a - ((40 / 60) * 2 + (20 / 60) * 8)) < 1e-9, `a=${fit.a}`);
+  assert.ok(Math.abs(fit.b - ((40 / 60) * 0.001 + (20 / 60) * 0.006)) < 1e-9, `b=${fit.b}`);
+  const wild = fitParams(Array.from({ length: 30 }, (_, i) => ({ input_chars: 100 + i, ms: 600000 - i * 10000 })));
+  assert.ok(wild.a <= 120 && wild.b >= 0.0002, "klemt innenfor grensene");
+
+  assert.equal(makespan([5, 4, 3, 3], 2), 8, "LPT: 5+3 og 4+3");
+  assert.equal(makespan([5, 4], 1), 9);
+  const p = { a: 10, b: 0.01 };
+  // To kall: [1000, 500] og [1000, 1000, 2000] → steg [1000, 500, 1000, 1000] + [2000].
+  const plan = [[1000, 500], [1000, 1000, 2000]];
+  const step1 = makespan([20, 15, 20, 20], 2) + 3;
+  const step2 = 30 + 3;
+  assert.equal(predictFile(plan, p, 2), step1 + step2);
+  assert.equal(predictFile([], p, 2), 0);
+  assert.equal(predictSending([plan, [[1000]]], p, 2), step1 + step2 + 20 + 3);
+  assert.equal(predictFile([[100]], DEFAULT_PARAMS, 2), 8 + 0.6 + 3);
+
+  const batches = [1000, 500, 1000, 1000, 2000].map((chars, idx) => ({ idx, chars }));
+  assert.equal(liveEta(batches, new Map(), p, 2), predictFile(plan, p, 2), "ingenting ferdig = estimatet");
+  // To batcher tok dobbelt så lang tid som beregnet (r = 2, vekt 2 mot 3): resten × (2·2 + 3)/(2 + 3) = 1,4.
+  const done = new Map([[0, 40000], [1, 30000]]);
+  const rest = makespan([20, 20], 2) + 3 + 30 + 3;
+  assert.ok(Math.abs(liveEta(batches, done, p, 2) - rest * 1.4) < 1e-9);
+  assert.equal(liveEta(batches, new Map(batches.map((b) => [b.idx, 1000])), p, 2), 0, "alt ferdig");
 });
 
 test("hemmeligheter vaskes bort fra hendelser og logglinjer", async () => {
   const { scrub, redactSecrets } = await load("log.js");
-  const env = { AGENT_TOKEN: "agent-hemmelig-1234567890", SALT_PEPPER: "pepper-hemmelig", APNS_KEY_P8: "-----BEGIN PRIVATE KEY-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldY\n-----END PRIVATE KEY-----" };
+  const env = { XAI_API_KEY: "nokkel-hemmelig-1234567890", SALT_PEPPER: "pepper-hemmelig", APNS_KEY_P8: "-----BEGIN PRIVATE KEY-----\nQUJDREVGR0hJSktMTU5PUFFSU1RVVldY\n-----END PRIVATE KEY-----" };
   assert.deepEqual(scrub({ password: "x", proof: "y", nested: { authorization: "Bearer z", inputTokens: 5 }, note: "Bearer abc.def" }), {
     password: "[skjult]", proof: "[skjult]", nested: { authorization: "[skjult]", inputTokens: 5 }, note: "Bearer [skjult]",
   });
   assert.equal(scrub("nøkkel: -----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY----- slutt"), "nøkkel: [skjult] slutt");
-  const text = redactSecrets(env, "agent-hemmelig-1234567890 pepper-hemmelig QUJDREVGR0hJSktMTU5PUFFSU1RVVldY ok");
+  assert.equal(scrub("feil med xai-AbCdEf0123456789 her"), "feil med [skjult] her");
+  const text = redactSecrets(env, "nokkel-hemmelig-1234567890 pepper-hemmelig QUJDREVGR0hJSktMTU5PUFFSU1RVVldY ok");
   assert.equal(text, "[skjult] [skjult] [skjult] ok");
+});
+
+test("konfig: modell, samtidighet og priser (tom pris = ukjent)", async () => {
+  const { config } = await load("config.js");
+  const empty = config({ XAI_PRICE_INPUT_PER_M: "", XAI_PRICE_OUTPUT_PER_M: "" });
+  assert.deepEqual([empty.model, empty.concurrency, empty.priceInputPerM, empty.priceOutputPerM], ["grok-4.6", 2, null, null]);
+  const set = config({ XAI_MODEL: "grok-x", GROK_CONCURRENCY: "3", XAI_PRICE_INPUT_PER_M: "0.2", XAI_PRICE_OUTPUT_PER_M: "0" });
+  assert.deepEqual([set.model, set.concurrency, set.priceInputPerM, set.priceOutputPerM], ["grok-x", 3, 0.2, 0]);
+  const { costUsd } = await load("xai.js");
+  assert.equal(costUsd({ XAI_PRICE_INPUT_PER_M: "2", XAI_PRICE_OUTPUT_PER_M: "10" }, 1500, 300), 0.006);
+  assert.equal(costUsd({ XAI_PRICE_INPUT_PER_M: "2" }, 1500, 300), null);
 });
 
 test("make-user lager SQL med salt og verifier – aldri passordet", async () => {

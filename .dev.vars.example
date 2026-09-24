@@ -1,8 +1,13 @@
 # Lokale hemmeligheter for `npm run dev` (wrangler dev). Kopier til .dev.vars og fyll inn.
 # .dev.vars er i .gitignore og skal aldri committes. Skriv aldri ekte verdier i denne filen.
 
-# Nøkkelen Mac-agenten bruker mot /api/agent/* (lang og tilfeldig, f.eks. `openssl rand -base64 36`).
-AGENT_TOKEN=
+# xAI-nøkkelen oversettelsen bruker (påkrevd for å sende). Må ha chat-/modelltilgang
+# (api-key:endpoint:* og api-key:model:*), ikke bare voice.
+XAI_API_KEY=
+
+# Utvikling uten ekte xAI: pek på den falske serveren (node test/helpers/mock-xai-server.js 18080)
+# og bruk en tilfeldig verdi som XAI_API_KEY.
+# XAI_BASE_URL=http://127.0.0.1:18080
 
 # Push til iPhone (APNs). Hele teksten i .p8-filen fra developer.apple.com, med linjeskift som \n.
 APNS_KEY_P8=

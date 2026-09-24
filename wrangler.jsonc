@@ -1,11 +1,13 @@
-// InnNorsk Drop — Cloudflare Worker (Free-plan): nettside, API, agent-API for Mac-en, push til iPhone og opprydding.
+// InnNorsk — Cloudflare Worker (Workers Paid): nettside, API, oversettelse med xAI i en Workflow, push til iPhone og opprydding.
 // Første gang:
 //   npx wrangler d1 create innnorsk            → lim inn database_id under
 //   npx wrangler r2 bucket create innnorsk-files
-//   npx wrangler secret put AGENT_TOKEN        (og APNS_KEY_ID, APNS_TEAM_ID, eventuelt SALT_PEPPER)
-//   npx wrangler secret put APNS_KEY_P8 < AuthKey_XXXXXXXXXX.p8
+//   npx wrangler secret put XAI_API_KEY        (påkrevd: xAI-nøkkel med chat-/modelltilgang, ikke bare voice)
+//   npx wrangler secret put SALT_PEPPER        (valgfri)
+//   npx wrangler secret put APNS_KEY_P8 < AuthKey_XXXXXXXXXX.p8   (valgfri push, sammen med APNS_KEY_ID og APNS_TEAM_ID)
 //   npm run deploy
 //   node scripts/make-user.js <brukernavn> --role admin|user --display-name "Navn" --apply   (én gang per bruker)
+// XAI_PRICE_INPUT_PER_M / XAI_PRICE_OUTPUT_PER_M: USD per million tokens. Tomme = kostnaden er ukjent, admin viser bare tokens.
 // Hemmeligheter står aldri her. Lokalt: kopier .dev.vars.example til .dev.vars (committes aldri).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -13,18 +15,23 @@
   "main": "worker/index.js",
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  "limits": { "cpu_ms": 300000 },
   "assets": { "directory": "./web", "binding": "ASSETS", "run_worker_first": true },
   "d1_databases": [
     { "binding": "DB", "database_name": "innnorsk", "database_id": "<SETT INN ETTER wrangler d1 create>", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "innnorsk-files" }],
+  "workflows": [{ "name": "innnorsk-translate", "binding": "TRANSLATE", "class_name": "TranslateSending" }],
   "triggers": { "crons": ["*/15 * * * *"] },
   "observability": { "enabled": true },
   "vars": {
     "MAX_FILE_MB": "50",
     "MAX_FILES_PER_SENDING": "50",
+    "XAI_MODEL": "grok-4.6",
+    "GROK_CONCURRENCY": "2",
+    "XAI_PRICE_INPUT_PER_M": "",
+    "XAI_PRICE_OUTPUT_PER_M": "",
     "APNS_BUNDLE_ID": "no.innnorsk.varsel",
-    "APNS_ENV": "sandbox",
-    "AGENT_OFFLINE_ALERT_MINUTES": "120"
+    "APNS_ENV": "sandbox"
   }
 }

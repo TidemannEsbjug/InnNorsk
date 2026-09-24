@@ -1,10 +1,10 @@
-// Starter Workeren lokalt (wrangler dev) med egen D1/R2 i en midlertidig mappe, testbrukere laget med
-// scripts/make-user.js og en falsk APNs-server (test/helpers/mock-apns.js). Kaller aldri Apple, xAI eller Grok.
-//   const dev = await require("./worker-dev").start({ vars: { AGENT_OFFLINE_ALERT_MINUTES: "1" } });
-//   dev.url · dev.agentToken · dev.users.svetlana.password · dev.apns.pushes · dev.persistDir
+// Starter Workeren lokalt (wrangler dev, med Workflowen) med egen D1/R2 i en midlertidig mappe, testbrukere laget med
+// scripts/make-user.js, en falsk xAI (test/helpers/mock-xai-server.js) og en falsk APNs (test/helpers/mock-apns.js).
+// Kaller aldri Apple eller xAI; XAI_API_KEY er en dummyverdi.
+//   const dev = await require("./worker-dev").start({ vars: { GROK_CONCURRENCY: "1" }, xai: { mode: "slow", delayMs: 800 } });
+//   dev.url · dev.users.svetlana.password · dev.xai.state.requests · dev.xai.setMode("fail401") · dev.apns.pushes
 //   const svetlana = await dev.login("svetlana");    // Client med økt (test/worker/client.js)
-//   const agent = dev.agent();                       // Client med Authorization: Bearer <AGENT_TOKEN>
-//   await dev.sql("SELECT ..."); await dev.cron(); dev.logs(); await dev.stop();
+//   await dev.sql("SELECT ..."); await dev.r2Keys("work/"); await dev.cron(); dev.logs(); await dev.stop();
 // .dev.vars og .env i repoet leses aldri (egen --env-file), så ekte nøkler kan ikke lekke inn i tester.
 const { spawn, execFile } = require("node:child_process");
 const crypto = require("node:crypto");
@@ -14,6 +14,7 @@ const path = require("node:path");
 const net = require("node:net");
 const { makeUserSql } = require("../../scripts/make-user");
 const mockApns = require("./mock-apns");
+const mockXai = require("./mock-xai-server");
 const { Client } = require("../worker/client");
 
 const ROOT = path.resolve(__dirname, "../..");
@@ -26,7 +27,9 @@ const DEFAULT_USERS = {
   eier: { username: "eier", displayName: "Jonas", role: "admin", password: "eier-testpassord-123" },
   svetlana: { username: "svetlana", displayName: "Svetlana", role: "user", password: "testpassord-123" },
 };
-const AGENT_TOKEN = "test-agentnokkel-bare-for-tester-0123456789";
+const XAI_API_KEY = "test-xai-nokkel-bare-for-tester-0123456789";
+// Testpriser (USD per million tokens), så kostnad regnes ut. Sett dem til "" for «ukjent pris».
+const PRICES = { XAI_PRICE_INPUT_PER_M: "2", XAI_PRICE_OUTPUT_PER_M: "10" };
 
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const QUIET = { WRANGLER_SEND_METRICS: "false", CI: "1", NO_COLOR: "1" };
@@ -65,9 +68,11 @@ function apnsKeyPair() {
 }
 
 // users: { navn: { username, displayName, role, password, mustChangePassword } } (standard: eier + svetlana).
-async function start({ vars = {}, users = DEFAULT_USERS } = {}) {
+// xai: { mode, delayMs } for den falske xAI-serveren (standard upper).
+async function start({ vars = {}, users = DEFAULT_USERS, xai: xaiOptions = {} } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "innnorsk-dev-"));
   let apns = null;
+  let xai = null;
   let child = null;
   let exited = true;
   let exitPromise = Promise.resolve();
@@ -90,6 +95,7 @@ async function start({ vars = {}, users = DEFAULT_USERS } = {}) {
       clearTimeout(timer);
     }
     if (apns) await apns.close();
+    if (xai) await xai.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 
@@ -99,8 +105,11 @@ async function start({ vars = {}, users = DEFAULT_USERS } = {}) {
     if (Object.keys(users).length) await createUsers(dir, users);
     const key = apnsKeyPair();
     if (!vars.APNS_BASE_URL) apns = await mockApns.start({ publicKey: key.publicKey });
+    if (!vars.XAI_BASE_URL) xai = await mockXai.start(xaiOptions);
     const all = {
-      AGENT_TOKEN,
+      XAI_API_KEY,
+      ...(xai ? { XAI_BASE_URL: xai.url } : {}),
+      ...PRICES,
       APNS_KEY_P8: key.pem,
       APNS_KEY_ID: "TESTKEY123",
       APNS_TEAM_ID: "TESTTEAM12",
@@ -192,13 +201,12 @@ async function start({ vars = {}, users = DEFAULT_USERS } = {}) {
       persistDir: dir,
       vars: all,
       users,
-      agentToken: all.AGENT_TOKEN,
       apns,
+      xai,
       logs: () => output,
       sql,
       r2Keys,
       login,
-      agent: (token = all.AGENT_TOKEN) => new Client(url, { bearer: token }),
       cron,
       stop,
     };
@@ -208,4 +216,4 @@ async function start({ vars = {}, users = DEFAULT_USERS } = {}) {
   }
 }
 
-module.exports = { start, DEFAULT_USERS, AGENT_TOKEN };
+module.exports = { start, DEFAULT_USERS };

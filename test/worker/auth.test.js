@@ -1,4 +1,5 @@
 // Innlogging med klientberegnet PBKDF2-bevis, økter, brems, CSRF, sider, sikkerhetshoder og make-user.js mot ekte wrangler dev.
+// Workeren kjører her uten XAI_API_KEY, som før eieren har lagt inn nøkkelen.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -19,7 +20,7 @@ const freshIp = () => `10.9.${Math.floor(++ipCounter / 250)}.${ipCounter % 250}`
 const countEvents = async (type) => (await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = ?", type))[0].n;
 
 test.before(async () => {
-  dev = await workerDev.start();
+  dev = await workerDev.start({ vars: { XAI_API_KEY: "" } });
   admin = await dev.login("eier");
 });
 
@@ -256,4 +257,17 @@ test("make-user.js: CLI-en lager brukeren i D1, innlogging virker, og ny kjørin
   assert.equal((await new Client(dev.url, { ip: freshIp() }).login("olga", "olgas-passord-1")).status, 401);
   assert.equal((await new Client(dev.url, { ip: freshIp() }).login("olga", "olgas-nye-passord-2")).status, 200);
   assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM users WHERE username = 'Olga'"))[0].n, 1);
+});
+
+test("uten XAI_API_KEY: sendingen avvises vennlig (503), og «Test xAI» og oversikten sier hva som mangler", async () => {
+  const svetlana = await dev.login("svetlana", { ip: freshIp() });
+  const sending = await svetlana.newSending();
+  assert.equal((await svetlana.upload(sending.id, "brev.txt", "Hello")).status, 201);
+  const res = await svetlana.post(`/api/sendings/${sending.id}/send`);
+  assert.deepEqual([res.status, res.data.error], [503, "Oversettelsen er ikke satt opp ennå. Si fra til Jonas."]);
+  assert.equal((await svetlana.get(`/api/sendings/${sending.id}`)).data.sending.status, "draft", "hun kan sende når nøkkelen er på plass");
+  const check = await admin.post("/api/admin/test-api");
+  assert.deepEqual([check.data.ok, check.data.error], [false, "XAI_API_KEY er ikke satt på serveren (npx wrangler secret put XAI_API_KEY)."]);
+  assert.equal((await admin.get("/api/admin/overview")).data.translator.apiKeyConfigured, false);
+  assert.equal(dev.xai.state.calls, 0, "ingen kall mot xAI");
 });

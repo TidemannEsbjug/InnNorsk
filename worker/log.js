@@ -31,7 +31,7 @@ export function scrub(value, depth = 0) {
 // Siste forsvarslinje: kjente hemmeligheter fra env byttes ut uansett hvor de dukker opp
 // (også hver base64-linje i APNs-nøkkelen, i tilfelle PEM-en er delt opp).
 function secretsOf(env) {
-  const out = [env.AGENT_TOKEN, env.SALT_PEPPER, env.APNS_KEY_P8];
+  const out = [env.XAI_API_KEY, env.SALT_PEPPER, env.APNS_KEY_P8];
   for (const line of String(env.APNS_KEY_P8 || "").split(/\\n|\s+/)) if (!line.startsWith("-")) out.push(line);
   return out.filter((s) => typeof s === "string" && s.length >= 8);
 }

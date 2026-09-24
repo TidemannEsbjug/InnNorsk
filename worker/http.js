@@ -10,12 +10,9 @@ export function fail(status, message) {
   throw new HttpError(status, message);
 }
 
-// optional: tom kropp gir {} (agenten kan sende f.eks. claim uten innhold).
-export async function readJson(c, { optional = false } = {}) {
+export async function readJson(c) {
   try {
-    const text = await c.req.text();
-    if (optional && !text.trim()) return {};
-    const body = JSON.parse(text);
+    const body = JSON.parse(await c.req.text());
     if (body && typeof body === "object" && !Array.isArray(body)) return body;
   } catch {
     // faller gjennom til feilmeldingen under

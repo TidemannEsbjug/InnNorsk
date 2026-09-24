@@ -1,13 +1,20 @@
-// Eierens admin: oversikt (Mac-agent, kø, lagring), sendinger, manuell opplasting, logg, økter, brukere og iPhone-enheter.
+// Eierens admin: oversikt (xAI-forbruk, kø, lagring, estimatmodell), sendinger med Grok-kall, manuell opplasting,
+// sett i kø igjen, test av xAI, logg, økter, brukere og iPhone-enheter.
 import { Hono } from "hono";
-import { one, all, run, batch, nowIso, parseJson } from "../db.js";
+import grok from "../../src/grok.js";
+import { config } from "../config.js";
+import { one, all, run, batch, nowIso, isoAgo, parseJson, DAY_MS } from "../db.js";
 import { logEvent, LEVELS } from "../log.js";
 import { fail, readJson, reqCtx, str, clamp } from "../http.js";
 import { USERNAME, requireAdmin, findUserByName, newSecret, normalizeUsername, revokeUserSessions } from "../auth.js";
 import { pushToUser } from "../apns.js";
-import { isAgentOnline, listSendings, loadFile, saveResult, finishIfDone, sendingView } from "../sendings.js";
+import { baseName, sanitizePath, r2Key, contentLength, sizeProblem, putBody } from "../files.js";
+import { listSendings, loadFile, markDone, finishIfDone, sendingView, startWorkflow } from "../sendings.js";
+import { costUsd, estimatorParams, grokOptions, recordCall } from "../xai.js";
 
-const SOURCES = ["web", "agent", "ios", "system"];
+const SOURCES = ["web", "ios", "system"];
+// Oversettelser kan bli større enn originalen (PDF → Word).
+const RESULT_MAX_MB = 100;
 const ROLES = ["admin", "user"];
 const likeArg = (q) => `%${q.replace(/[\\%_]/g, "\\$&")}%`;
 
@@ -66,6 +73,26 @@ function serializeDevice(d) {
   };
 }
 
+function serializeCall(env, r) {
+  return {
+    id: r.id,
+    ts: r.ts,
+    model: r.model,
+    status: r.status,
+    ok: Boolean(r.ok),
+    attempt: r.attempt,
+    items: r.items,
+    inputChars: r.input_chars,
+    outputChars: r.output_chars,
+    ms: r.ms,
+    inputTokens: r.input_tokens,
+    outputTokens: r.output_tokens,
+    reasoningTokens: r.reasoning_tokens,
+    costUsd: costUsd(env, r.input_tokens, r.output_tokens),
+    error: r.error,
+  };
+}
+
 const USER_SELECT = `SELECT u.*, (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL AND s.expires_at > ?)
   AS active_sessions FROM users u`;
 const DEVICE_SELECT = "SELECT d.*, u.username FROM devices d LEFT JOIN users u ON u.id = d.user_id ORDER BY d.created_at";
@@ -77,8 +104,8 @@ const admin = new Hono();
 admin.use("*", requireAdmin);
 
 admin.get("/overview", async (c) => {
-  const [agent, counts, storage, devices, users] = await batch(c.env, [
-    ["SELECT * FROM agent WHERE id = 1"],
+  const env = c.env;
+  const [counts, storage, devices, users, usage, lastCall, lastError] = await batch(env, [
     [
       `SELECT COALESCE(SUM(status = 'sent'), 0) AS waiting, COALESCE(SUM(status = 'working'), 0) AS working,
          COALESCE(SUM(status = 'done' AND finished_at >= ?), 0) AS doneToday, COALESCE(SUM(status = 'failed'), 0) AS failed
@@ -91,56 +118,118 @@ admin.get("/overview", async (c) => {
     ],
     [DEVICE_SELECT],
     ["SELECT COUNT(*) AS n FROM users"],
+    [
+      `SELECT COUNT(*) AS calls, COALESCE(SUM(ok = 0), 0) AS failed, COALESCE(SUM(input_tokens), 0) AS input,
+         COALESCE(SUM(output_tokens), 0) AS output FROM grok_calls WHERE ts >= ?`,
+      isoAgo(DAY_MS),
+    ],
+    ["SELECT MAX(ts) AS ts FROM grok_calls"],
+    ["SELECT ts, error FROM grok_calls WHERE ok = 0 ORDER BY id DESC LIMIT 1"],
   ]);
-  const a = agent.results[0];
+  const day = usage.results[0];
+  const error = lastError.results[0];
+  const params = await estimatorParams(env);
   return c.json({
-    agent: {
-      online: isAgentOnline(a),
-      lastSeenAt: a.last_seen_at,
-      host: a.host,
-      version: a.version,
-      state: a.state,
-      stateMessage: a.state_message,
-      grokOk: a.grok_ok == null ? null : Boolean(a.grok_ok),
+    translator: {
+      apiKeyConfigured: Boolean(env.XAI_API_KEY),
+      model: config(env).model,
+      calls24h: day.calls,
+      failedCalls24h: day.failed,
+      tokens24h: { input: day.input, output: day.output },
+      cost24h: costUsd(env, day.input, day.output),
+      lastCallAt: lastCall.results[0].ts,
+      lastError: error ? error.error : null,
+      lastErrorAt: error ? error.ts : null,
     },
     counts: counts.results[0],
     storage: storage.results[0],
     devices: devices.results.map(serializeDevice),
     users: users.results[0].n,
+    estimator: { a: Number(params.a.toFixed(2)), b: Number(params.b.toFixed(5)), samples: params.samples, source: params.source },
   });
 });
 
 admin.get("/sendings", async (c) =>
   c.json(await listSendings(c.env, { limit: clamp(c.req.query("limit"), 1, 200, 50), admin: true })));
 
+const notSentYet = (f) => f.status === "draft" || f.sending_status === "draft";
+
 admin.put("/files/:fileId/result", async (c) => {
+  const env = c.env;
   const f = await loadFile(c, c.req.param("fileId"));
-  if (f.status === "draft") fail(409, "Filen er ikke sendt ennå.");
-  await saveResult(c, f, { source: "manual", ctx: reqCtx(c, { sendingId: f.sending_id, fileId: f.id }) });
-  return c.json({ sending: await sendingView(c.env, f.sending_id, true) });
+  if (notSentYet(f)) fail(409, "Filen er ikke sendt ennå.");
+  const name = baseName(sanitizePath(c.req.query("name")));
+  if (!name) fail(400, "Filnavnet på oversettelsen mangler.");
+  const problem = sizeProblem(contentLength(c), RESULT_MAX_MB * 1024 * 1024, `Oversettelsen er for stor (maks ${RESULT_MAX_MB} MB).`);
+  if (problem) fail(...problem);
+  const ctx = reqCtx(c, { sendingId: f.sending_id, fileId: f.id });
+  const bytes = await putBody(c, r2Key(f.sending_id, f.id, "result"), name, ctx);
+  if (!(await markDone(env, f, { name, bytes, source: "manual", ctx }))) fail(410, "Sendingen er slettet.");
+  await finishIfDone(env, f.sending_id, ctx);
+  return c.json({ sending: await sendingView(env, f.sending_id, true) });
 });
 
+// «sent» = sett i kø igjen: en ny Workflow-instans tar filen (mellomlagrede batcher gjenbrukes).
+// message er en valgfri tekst Svetlana ser (brukes for «failed»).
 admin.post("/files/:fileId/status", async (c) => {
   const env = c.env;
   const f = await loadFile(c, c.req.param("fileId"));
   const body = await readJson(c);
   const message = str(body.message, 1000).trim() || null;
   const now = nowIso();
-  // «sent» = sett i kø igjen for Mac-en; message er en valgfri tekst Svetlana ser (brukes for «failed»).
   const change = {
-    sent: ["status = 'sent', started_at = NULL, finished_at = NULL, progress_at = NULL", []],
+    sent: [`status = 'sent', workflow_id = NULL, started_at = NULL, finished_at = NULL, progress_percent = NULL, eta_seconds = NULL,
+      progress_at = NULL, error = NULL, error_details = NULL`, []],
     failed: ["status = 'failed', finished_at = ?", [now]],
     done: ["status = 'done', finished_at = COALESCE(finished_at, ?)", [now]],
   }[body.status];
   if (!change) fail(400, "Ugyldig status.");
-  if (f.status === "draft") fail(409, "Filen er ikke sendt ennå.");
+  if (notSentYet(f)) fail(409, "Filen er ikke sendt ennå.");
   if (body.status === "done" && !f.output_name) fail(409, "Filen har ingen oversettelse ennå. Last opp en først.");
+  if (body.status === "sent" && !env.XAI_API_KEY) fail(503, "XAI_API_KEY er ikke satt på serveren (npx wrangler secret put XAI_API_KEY).");
   const [assignments, args] = change;
-  await run(env, `UPDATE files SET ${assignments}, lease_until = NULL, message = ? WHERE id = ?`, ...args, message, f.id);
+  await run(env, `UPDATE files SET ${assignments}, message = ? WHERE id = ?`, ...args, message, f.id);
   const ctx = reqCtx(c, { sendingId: f.sending_id, fileId: f.id });
   await logEvent(env, "info", "file.status_changed", `${f.name}: ${f.status} → ${body.status}`, { from: f.status, to: body.status, message }, ctx);
   await finishIfDone(env, f.sending_id, ctx);
+  if (body.status === "sent") {
+    try {
+      await startWorkflow(env, f.sending_id, f.sending_workflow_id);
+    } catch (err) {
+      await run(env, "UPDATE files SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND status = 'sent'",
+        `Oversettelsen kunne ikke startes: ${err.message}`, nowIso(), f.id);
+      await finishIfDone(env, f.sending_id, ctx);
+      fail(503, "Oversettelsen kunne ikke startes akkurat nå. Prøv igjen om litt.");
+    }
+  }
   return c.json({ sending: await sendingView(env, f.sending_id, true) });
+});
+
+admin.get("/files/:fileId/calls", async (c) => {
+  const f = await loadFile(c, c.req.param("fileId"));
+  const rows = await all(c.env, "SELECT * FROM grok_calls WHERE file_id = ? ORDER BY id DESC LIMIT 200", f.id);
+  return c.json({ calls: rows.map((r) => serializeCall(c.env, r)) });
+});
+
+// Ett lite kall mot xAI med serverens nøkkel (maks ett i minuttet). Kallet havner i grok_calls som alle andre.
+admin.post("/test-api", async (c) => {
+  const env = c.env;
+  const recent = await one(env, "SELECT COUNT(*) AS n FROM events WHERE type = 'admin.test_api' AND ts > ?", isoAgo(60000));
+  if (recent.n) fail(429, "Vent et minutt før du tester igjen.");
+  const started = Date.now();
+  const calls = [];
+  let result;
+  try {
+    if (!env.XAI_API_KEY) throw new Error("XAI_API_KEY er ikke satt på serveren (npx wrangler secret put XAI_API_KEY).");
+    const { ms, sample } = await grok.testConnection(grokOptions(env, { onCall: (info) => calls.push(recordCall(env, {}, info)) }));
+    result = { ok: true, ms, sample };
+  } catch (err) {
+    result = { ok: false, ms: Date.now() - started, error: err.message };
+  }
+  await Promise.allSettled(calls);
+  await logEvent(env, result.ok ? "info" : "warn", "admin.test_api",
+    result.ok ? `xAI svarte på ${result.ms} ms` : `Test av xAI feilet: ${result.error}`, { ...result, model: config(env).model }, reqCtx(c));
+  return c.json(result);
 });
 
 admin.post("/sendings/:id/reply", async (c) => {

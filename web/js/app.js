@@ -10,7 +10,7 @@ initMenu();
 // Samme liste som SUPPORTED i src/core.js. Serveren sjekker uansett; dette er for å kunne forklare med én gang.
 const SUPPORTED = new Set([".docx", ".pptx", ".xlsx", ".pdf", ".txt", ".md", ".csv", ".html", ".htm", ".rtf"]);
 const OLD_OFFICE = new Set([".doc", ".ppt", ".xls"]);
-const PERMANENT = new Set([400, 413, 415]); // gjelder bare den ene filen; resten kan sendes
+const PERMANENT = new Set([400, 413, 415, 422]); // gjelder bare den ene filen; resten kan oversettes
 const ACTIVE = new Set(["sent", "working"]);
 const LANG_KEY = "innnorsk.language";
 const SEEN_KEY = "innnorsk.seenDone";
@@ -22,17 +22,9 @@ const SKIP_TEXT = {
   empty: () => "Tomme filer.",
   big: () => `Filer som er større enn ${state.limits.maxFileMb} MB.`,
   duplicate: () => "Filer som allerede ligger i listen.",
-  many: () => `Mer enn ${state.limits.maxFilesPerSending} filer på en gang. Send gjerne resten etterpå.`,
+  many: () => `Mer enn ${state.limits.maxFilesPerSending} filer på en gang. Ta gjerne resten etterpå.`,
 };
 const HARMLESS = new Set(["lock", "hidden", "duplicate", "empty"]);
-
-const PILL = {
-  draft: "Ikke sendt ennå",
-  sent: "Mottatt",
-  working: "Oversettes nå",
-  done: "Ferdig",
-  failed: "Oversetteren ser på denne filen",
-};
 
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
@@ -40,12 +32,17 @@ const enc = encodeURIComponent;
 const state = {
   me: null,
   translator: "oversetteren",
-  queue: [], // { file, path, status: "ready" | "uploading" | "done" | "error", pct, error, fileId, el }
-  draft: null, // sendingen på serveren mens filene lastes opp
+  // { file, path, status: "waiting" | "uploading" | "ready" | "skip" | "error", pct, error, permanent, fileId, info, abort, el }
+  // ready = lastet opp og klar; skip = lastet opp, men kan ikke oversettes (skannet/skadet) og hoppes over.
+  queue: [],
+  draft: null, // sendingen på serveren (utkast) som filene lastes opp til
+  pumping: null, // løftet til opplastingskøen mens den går
+  estimate: null, // beregnet tid (sekunder) for utkastet, fra serveren
+  estimateFor: "", // hvilke filer estimatet gjelder (fil-ID-er)
   sending: false,
   sendings: [],
   limits: { maxFileMb: 50, maxFilesPerSending: 50 }, // fra /api/auth/me; serveren sjekker uansett
-  fetchedAt: 0, // når listen sist ble hentet (etaSeconds gjelder fra da)
+  fetchedAt: 0, // når listen sist ble hentet (etaSeconds/estimateSeconds gjelder fra da)
   statuses: new Map(), // fil-ID → status sist vi tegnet, for å merke overganger
   seen: null, // ferdige fil-ID-er hun har sett (localStorage)
   fresh: new Set(), // ferdige siden forrige besøk; fremheves så lenge siden er åpen
@@ -53,8 +50,11 @@ const state = {
   failures: 0,
 };
 
-// Brytes bare mellom delene i «Sendt kl. 14:05 · Bokmål · 2 filer», ikke inni dem.
+// Brytes bare mellom delene i «Startet kl. 14:05 · Bokmål · 2 filer», ikke inni dem.
 const nbsp = (text) => text.replace(/ /g, "\u00a0");
+// «kl. 14:32» og «ca. 3 min» deles aldri over to linjer.
+const at = (time) => `kl.\u00a0${formatClock(time)}`;
+const dur = (seconds) => nbsp(formatDuration(seconds));
 
 function say(el, message) {
   el.textContent = message;
@@ -66,6 +66,13 @@ function bar(percent, label) {
   fillEl.style.width = `${percent}%`;
   return h("div", { class: "bar", role: "progressbar", "aria-label": label, "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(Math.round(percent)) }, fillEl);
 }
+
+const chosenLanguage = () => document.querySelector('input[name="lang"]:checked').value;
+const isBusyUploading = () => state.queue.some((item) => item.status === "waiting" || item.status === "uploading");
+const readyItems = () => state.queue.filter((item) => item.status === "ready");
+// Hoppes over: serveren fant ingen tekst (skannet/skadet), eller filen ble avvist ved opplasting (for stor o.l.).
+const isSkipped = (item) => item.status === "skip" || (item.status === "error" && item.permanent);
+const isRetryable = (item) => item.status === "error" && !item.permanent;
 
 // ---------- Velge filer ----------
 
@@ -87,6 +94,7 @@ function addFiles(entries) {
   showCompose();
   const known = new Set(state.queue.map((item) => item.path.toLowerCase()));
   const skipped = {};
+  let added = 0;
   for (const { file, path } of entries) {
     const reason = skipReason(path, file, known);
     if (reason) {
@@ -94,10 +102,14 @@ function addFiles(entries) {
       continue;
     }
     known.add(path.toLowerCase());
-    state.queue.push({ file, path, status: "ready", pct: 0, error: "", fileId: null, el: null });
+    state.queue.push({ file, path, status: "waiting", pct: 0, error: "", permanent: false, fileId: null, info: null, abort: null, el: null });
+    added++;
   }
   renderSkipped(skipped);
+  say($("send-error"), "");
   renderQueue();
+  // Filene lastes opp og ses gjennom med én gang, så hun får vite hvor lang tid det tar før hun trykker.
+  if (added) pump();
 }
 
 function renderSkipped(skipped) {
@@ -120,7 +132,7 @@ function renderSkipped(skipped) {
       ? `Vi hoppet over ${plural(total, "fil", "filer")} – det er helt i orden:`
       : `${total === 1 ? "Én fil" : `${total} filer`} ble ikke tatt med:`)),
     h("ul", null, reasons.map((r) => h("li", null, SKIP_TEXT[r](), " ", h("span", { class: "muted" }, `(${names(skipped[r])})`)))),
-    skipped.type ? h("p", null, "Dette kan sendes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekst (.txt, .md, .csv), nettsider (.html) og RTF.") : null,
+    skipped.type ? h("p", null, "Dette kan oversettes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekst (.txt, .md, .csv), nettsider (.html) og RTF.") : null,
     oldOffice ? h("p", null, "Har du en eldre Office-fil (.doc, .ppt eller .xls)? Åpne den, velg «Lagre som» og lagre den i det nye formatet (.docx, .pptx eller .xlsx).") : null
   );
   box.hidden = false;
@@ -154,42 +166,241 @@ async function fromDrop(entries, files) {
   return out;
 }
 
+// ---------- Opplasting og gjennomgang (skjer med én gang filene er lagt til) ----------
+
+async function ensureDraft() {
+  if (state.draft) return state.draft;
+  const note = $("note").value.trim();
+  state.draft = (await api("/api/sendings", { method: "POST", body: { targetLanguage: chosenLanguage(), note: note || undefined } })).sending;
+  return state.draft;
+}
+
+function deleteServerFile(draftId, fileId) {
+  if (draftId && fileId) api(`/api/sendings/${enc(draftId)}/files/${enc(fileId)}`, { method: "DELETE" }).catch(() => {});
+}
+
+async function uploadItem(item) {
+  const draft = state.draft;
+  const controller = new AbortController();
+  Object.assign(item, { status: "uploading", pct: 0, error: "", permanent: false, abort: controller });
+  renderQueue();
+  try {
+    const url = `/api/sendings/${enc(draft.id)}/files?path=${enc(item.path)}`;
+    const { file } = await upload(url, item.file, { signal: controller.signal, onProgress: (pct) => progressItem(item, pct) });
+    if (!state.queue.includes(item) || state.draft !== draft) {
+      // Fjernet (eller utkastet byttet) mens den ble lastet opp.
+      deleteServerFile(draft.id, file.id);
+      return;
+    }
+    // Serveren ser gjennom filen ved opplasting: «failed» betyr at den ikke kan oversettes (skannet, skadet).
+    Object.assign(item, { status: file.status === "failed" ? "skip" : "ready", fileId: file.id, info: file });
+  } catch (err) {
+    if (err.aborted || !state.queue.includes(item)) return;
+    if (err.status === 404 || err.status === 409) {
+      // Utkastet finnes ikke lenger, eller er startet et annet sted: begynn på et nytt.
+      if (state.draft === draft) forgetDraft();
+      item.status = "waiting";
+      throw Object.assign(err, { gone: true });
+    }
+    Object.assign(item, { status: "error", error: err.message, permanent: PERMANENT.has(err.status) });
+  } finally {
+    item.abort = null;
+    renderQueue();
+  }
+}
+
+// Laster opp alle filene som venter, én om gangen. Kan kalles flere ganger; det går bare én kø.
+function pump() {
+  if (!state.pumping) {
+    state.pumping = (async () => {
+      await null; // state.pumping må være satt før køen kan bli ferdig (og nullstille den)
+      let problem = "";
+      let fresh = false;
+      try {
+        for (let guard = 0; guard < 1000; guard++) {
+          const item = state.queue.find((i) => i.status === "waiting");
+          if (!item) break;
+          try {
+            await ensureDraft();
+            await uploadItem(item);
+          } catch (err) {
+            if (err.gone && !fresh) {
+              fresh = true; // ett nytt utkast, og alt lastes opp dit
+              continue;
+            }
+            // Fikk ikke laget utkastet: marker resten og prøv igjen når hun trykker.
+            problem = err.message;
+            for (const other of state.queue) {
+              if (other.status === "waiting") Object.assign(other, { status: "error", error: err.message, permanent: false });
+            }
+            break;
+          }
+        }
+      } finally {
+        state.pumping = null;
+        renderQueue();
+      }
+      if (!state.queue.length) dropEmptyDraft();
+      else if (!problem) await refreshEstimate();
+      return problem;
+    })();
+  }
+  return state.pumping;
+}
+
+// Filer på utkastet som ikke er i listen (fjernet mens de ble lastet opp) skal ikke oversettes.
+async function dropOrphans(draft, sending) {
+  const known = new Set(state.queue.map((item) => item.fileId).filter(Boolean));
+  const orphans = (sending.files || []).filter((f) => !known.has(f.id));
+  await Promise.all(orphans.map((f) => api(`/api/sendings/${enc(draft.id)}/files/${enc(f.id)}`, { method: "DELETE" }).catch(() => {})));
+  return orphans.length > 0;
+}
+
+// Beregnet tid for hele utkastet (serveren regner på filene som kan oversettes).
+async function refreshEstimate() {
+  const draft = state.draft;
+  const key = readyItems().map((item) => item.fileId).join(",");
+  if (!draft || isBusyUploading() || !key || key === state.estimateFor) return;
+  try {
+    let { sending } = await api(`/api/sendings/${enc(draft.id)}`);
+    if (await dropOrphans(draft, sending)) ({ sending } = await api(`/api/sendings/${enc(draft.id)}`));
+    if (state.draft !== draft) return;
+    state.estimate = typeof sending.estimateSeconds === "number" ? sending.estimateSeconds : null;
+    state.estimateFor = key;
+    // Oppdater radene med serverens tekst (f.eks. «Klar – ca. 2 min»).
+    const byId = new Map((sending.files || []).map((f) => [f.id, f]));
+    for (const item of state.queue) if (byId.has(item.fileId)) item.info = byId.get(item.fileId);
+  } catch {
+    state.estimate = null; // estimatet er bare til hjelp; oversettelsen kan startes uansett
+  }
+  renderQueue();
+}
+
+function forgetDraft() {
+  state.draft = null;
+  state.estimate = null;
+  state.estimateFor = "";
+  for (const item of state.queue) {
+    if (item.abort) item.abort.abort();
+    Object.assign(item, { fileId: null, info: null, status: "waiting", error: "", permanent: false, pct: 0 });
+  }
+}
+
+// Tomt utkast: rydd bort, så det ikke blir liggende.
+function dropEmptyDraft() {
+  if (state.queue.length || !state.draft || state.pumping) return;
+  api(`/api/sendings/${enc(state.draft.id)}`, { method: "DELETE" }).catch(() => {});
+  forgetDraft();
+}
+
 function removeItem(item) {
   state.queue = state.queue.filter((other) => other !== item);
-  if (item.fileId && state.draft) {
-    api(`/api/sendings/${enc(state.draft.id)}/files/${enc(item.fileId)}`, { method: "DELETE" }).catch(() => {});
-  }
+  // Er hele filen sendt, lagrer serveren den uansett: la den bli ferdig og slett den da (se uploadItem).
+  if (item.abort && item.pct < 100) item.abort.abort();
+  else if (item.fileId && state.draft) deleteServerFile(state.draft.id, item.fileId);
   say($("send-error"), "");
+  dropEmptyDraft();
   renderQueue();
+  refreshEstimate();
   $(state.queue.length ? "btn-send" : "btn-files").focus();
 }
 
+function retryItem(item) {
+  Object.assign(item, { status: "waiting", error: "", permanent: false });
+  say($("send-error"), "");
+  renderQueue();
+  pump();
+}
+
 function queueStatus(item) {
-  if (item.status === "uploading") return `Laster opp … ${item.pct} %`;
-  if (item.status === "done") return [icon("check"), "Lastet opp"];
-  if (item.status === "error") return item.error;
-  return formatBytes(item.file.size);
+  switch (item.status) {
+    case "waiting":
+      return `Venter · ${formatBytes(item.file.size)}`;
+    case "uploading":
+      return item.pct >= 100 ? "Ser gjennom filen …" : `Laster opp … ${item.pct} %`;
+    case "ready":
+      return [icon("check"), (item.info && item.info.statusText) || "Klar"];
+    case "skip":
+      return (item.info && item.info.statusText) || "Denne filen kan ikke oversettes.";
+    default:
+      return item.error;
+  }
+}
+
+function queueRow(item) {
+  const name = baseName(item.path);
+  const lock = state.sending;
+  const skipped = isSkipped(item);
+  const remove = skipped
+    ? h("button", { type: "button", class: "btn-quiet q-action", "aria-label": `Fjern ${name}`, disabled: lock, onclick: () => removeItem(item) }, icon("close"), "Fjern fra listen")
+    : h("button", { type: "button", class: "icon-btn", "aria-label": `Fjern ${name}`, disabled: lock, onclick: () => removeItem(item) }, icon("close"));
+  return h("li", { class: `q q-${item.status}${skipped ? " is-skipped" : ""}` },
+    extBadge(name),
+    h("div", { class: "q-main" },
+      h("p", { class: "q-name" }, dirName(item.path) ? h("span", { class: "q-dir" }, dirName(item.path)) : null, name),
+      h("p", { class: "q-meta" }, queueStatus(item)),
+      skipped ? [h("p", { class: "q-hint" }, "Denne filen blir hoppet over. De andre oversettes som vanlig."), remove] : null,
+      isRetryable(item)
+        ? h("button", { type: "button", class: "btn-quiet q-action", disabled: lock, onclick: () => retryItem(item) }, icon("refresh"), "Prøv igjen")
+        : null,
+      item.status === "uploading" ? bar(item.pct, `Opplasting av ${name}`) : null
+    ),
+    skipped ? null : remove
+  );
 }
 
 function renderQueue() {
   fill($("queue"), state.queue.map((item) => {
-    const name = baseName(item.path);
-    item.el = h("li", { class: `q q-${item.status}` },
-      extBadge(name),
-      h("div", { class: "q-main" },
-        h("p", { class: "q-name" }, dirName(item.path) ? h("span", { class: "q-dir" }, dirName(item.path)) : null, name),
-        h("p", { class: "q-meta" }, queueStatus(item)),
-        item.status === "uploading" ? bar(item.pct, `Opplasting av ${name}`) : null
-      ),
-      h("button", { type: "button", class: "icon-btn", "aria-label": `Fjern ${name}`, disabled: state.sending, onclick: () => removeItem(item) }, icon("close"))
-    );
+    item.el = queueRow(item);
     return item.el;
   }));
-  const count = state.queue.length;
-  const bytes = state.queue.reduce((n, item) => n + item.file.size, 0);
-  $("summary").textContent = count ? `${plural(count, "fil", "filer")} · ${formatBytes(bytes)}` : "";
-  $("compose-more").hidden = !count;
-  $("btn-send").disabled = !count || state.sending;
+  $("compose-more").hidden = !state.queue.length;
+  renderSummary();
+}
+
+// «Beregnet tid» over hovedknappen, og om knappen kan trykkes.
+function renderSummary() {
+  const box = $("summary");
+  const button = $("btn-send");
+  const ready = readyItems();
+  const skipped = state.queue.filter(isSkipped).length;
+  const retryable = state.queue.some(isRetryable);
+  const busy = isBusyUploading();
+  const lang = (LANGUAGE_LABELS[chosenLanguage()] || "").toLowerCase();
+  button.disabled = state.sending || !state.queue.length || (!busy && !ready.length && !retryable);
+  if (state.sending) return;
+  button.textContent = "Oversett til norsk";
+  if (!state.queue.length) {
+    fill(box);
+    return;
+  }
+  if (busy) {
+    fill(box, h("p", { class: "estimate-wait" }, h("span", { class: "spinner", "aria-hidden": "true" }), "Laster opp og ser gjennom filene …"));
+    return;
+  }
+  if (!ready.length) {
+    fill(box, retryable
+      ? h("p", { class: "estimate-sub" }, "Noen filer ble ikke lastet opp. Trykk «Prøv igjen» ved filen, eller på knappen under.")
+      : h("p", { class: "estimate-sub" }, "Ingen av filene kan oversettes. Legg til andre filer."));
+    return;
+  }
+  const seconds = state.estimate != null && state.estimateFor === ready.map((item) => item.fileId).join(",")
+    ? state.estimate
+    : sumEstimates(ready);
+  const parts = [`${plural(ready.length, "fil", "filer")} blir oversatt til ${lang}`];
+  if (skipped) parts.push(`${skipped} hoppes over`);
+  if (retryable) parts.push("noen er ikke lastet opp ennå");
+  fill(box,
+    seconds != null
+      ? h("p", { class: "estimate-time" }, icon("clock"), h("span", null, "Beregnet tid: ", h("strong", null, dur(seconds))))
+      : null,
+    h("p", { class: "estimate-sub" }, parts.map(nbsp).join(" · ")));
+}
+
+// Reserve hvis serveren ikke gir et samlet estimat: summen av filenes egne.
+function sumEstimates(items) {
+  const values = items.map((item) => item.info && item.info.estimateSeconds);
+  return values.length && values.every((v) => typeof v === "number") ? values.reduce((a, b) => a + b, 0) : null;
 }
 
 function progressItem(item, pct) {
@@ -197,91 +408,118 @@ function progressItem(item, pct) {
   if (!item.el) return;
   item.el.querySelector(".q-meta").textContent = queueStatus(item);
   const barEl = item.el.querySelector(".bar");
+  if (!barEl) return;
   barEl.setAttribute("aria-valuenow", String(pct));
   barEl.firstChild.style.width = `${pct}%`;
 }
 
-// ---------- Sende ----------
+// ---------- Starte oversettelsen ----------
 
-function setSending(on) {
+function setSending(on, label = "Starter oversettelsen …") {
   state.sending = on;
   const button = $("btn-send");
-  button.textContent = on ? "Sender …" : `Send til ${state.translator}`;
   button.classList.toggle("is-busy", on);
   for (const id of ["btn-files", "btn-folder", "note"]) $(id).disabled = on;
   for (const radio of document.querySelectorAll('input[name="lang"]')) radio.disabled = on;
   $("drop").classList.toggle("is-disabled", on);
   renderQueue();
+  if (on) button.textContent = label;
 }
 
-function forgetDraft() {
-  state.draft = null;
-  for (const item of state.queue) Object.assign(item, { fileId: null, status: "ready", error: "" });
-}
-
-async function uploadItem(item) {
-  Object.assign(item, { status: "uploading", pct: 0, error: "" });
-  renderQueue();
-  try {
-    const url = `/api/sendings/${enc(state.draft.id)}/files?path=${enc(item.path)}`;
-    const { file } = await upload(url, item.file, { onProgress: (pct) => progressItem(item, pct) });
-    Object.assign(item, { status: "done", fileId: file.id });
-  } catch (err) {
-    Object.assign(item, { status: "error", error: err.message });
-    if (!PERMANENT.has(err.status)) throw err;
-  } finally {
-    renderQueue();
+// Laster opp det som mangler (også filer som feilet på grunn av nettet). Gir en feilmelding eller "".
+async function uploadRest() {
+  for (const item of state.queue) {
+    if (isRetryable(item)) Object.assign(item, { status: "waiting", error: "" });
   }
+  if (isBusyUploading()) setSending(true, "Laster opp …");
+  let problem = await pump();
+  // Kom det nye filer til mens køen gikk, tas de også.
+  for (let round = 0; round < 5 && !problem && state.queue.some((item) => item.status === "waiting"); round++) problem = await pump();
+  setSending(true);
+  const failed = state.queue.filter(isRetryable).length;
+  if (problem) return `${problem} Trykk «Oversett til norsk» for å prøve igjen.`;
+  if (failed) return `${failed === 1 ? "Én fil" : `${failed} filer`} kunne ikke lastes opp (se listen over). Fjern ${failed === 1 ? "den" : "dem"}, eller trykk «Oversett til norsk» for å prøve igjen.`;
+  if (!readyItems().length) return "Ingen av filene kan oversettes. Legg til andre filer.";
+  return "";
+}
+
+// Språket ble valgt etter at filene var lastet opp. Serveren som kan bytte språk på utkastet, gjør det
+// sammen med meldingen; ellers lages et nytt utkast og filene lastes opp på nytt.
+async function matchLanguage(targetLanguage, note) {
+  if (state.draft.targetLanguage === targetLanguage) return true;
+  const draft = state.draft;
+  const res = await api(`/api/sendings/${enc(draft.id)}/note`, { method: "POST", body: { note, targetLanguage } });
+  if (res && res.sending && res.sending.targetLanguage === targetLanguage) {
+    Object.assign(draft, { targetLanguage, note });
+    return true;
+  }
+  await api(`/api/sendings/${enc(draft.id)}`, { method: "DELETE" }).catch(() => {});
+  forgetDraft();
+  return false;
 }
 
 async function send() {
   if (state.sending || !state.queue.length) return;
-  const targetLanguage = document.querySelector('input[name="lang"]:checked').value;
-  const note = $("note").value.trim();
   const error = $("send-error");
   say(error, "");
+  error.classList.remove("is-soft");
   setSending(true);
   try {
-    if (state.draft && state.draft.targetLanguage !== targetLanguage) {
-      await api(`/api/sendings/${enc(state.draft.id)}`, { method: "DELETE" }).catch(() => {});
-      forgetDraft();
+    const targetLanguage = chosenLanguage();
+    const note = $("note").value.trim();
+    let problem = await uploadRest();
+    if (!problem && !(await matchLanguage(targetLanguage, note))) problem = await uploadRest();
+    if (problem) {
+      showSendError({ message: problem, status: -1 });
+      return;
     }
-    if (!state.draft) {
-      state.draft = (await api("/api/sendings", { method: "POST", body: { targetLanguage, note: note || undefined } })).sending;
-    } else if ((state.draft.note || "") !== note) {
+    if ((state.draft.note || "") !== note) {
       await api(`/api/sendings/${enc(state.draft.id)}/note`, { method: "POST", body: { note } });
       state.draft.note = note;
     }
-    for (const item of state.queue) {
-      if (item.status !== "done") await uploadItem(item);
-    }
-    const failed = state.queue.filter((item) => item.status === "error").length;
-    if (failed) {
-      say(error, `${failed === 1 ? "Én fil" : `${failed} filer`} kunne ikke sendes (se listen over). Fjern ${failed === 1 ? "den" : "dem"}, og trykk «Send» igjen.`);
-      return;
-    }
+    await dropOrphans(state.draft, (await api(`/api/sendings/${enc(state.draft.id)}`)).sending);
     const { sending } = await api(`/api/sendings/${enc(state.draft.id)}/send`, { method: "POST" });
-    showThanks(sending);
+    showStarted(sending);
   } catch (err) {
     if (err.status === 404) forgetDraft();
-    say(error, `${err.message} Trykk «Send» for å prøve igjen – det som allerede er lastet opp, sendes ikke på nytt.`);
+    showSendError(err);
   } finally {
     setSending(false);
   }
 }
 
-function showThanks(sending) {
-  const count = sending.files ? sending.files.length : state.queue.length;
-  const t = state.translator;
+function showSendError(err) {
+  const box = $("send-error");
+  // 503: oversettelsen er ikke satt opp ennå. Ingen feil hos henne – filene ligger trygt og kan startes senere.
+  const soft = err.status === 503;
+  box.classList.toggle("is-soft", soft);
+  fill(box,
+    h("p", null, err.message),
+    soft
+      ? h("p", null, "Filene dine er lagret, så du kan prøve igjen senere – også om du lukker siden i mellomtiden.")
+      : err.status === -1 ? null : h("p", null, "Trykk «Oversett til norsk» for å prøve igjen – det som allerede er lastet opp, lastes ikke opp på nytt."));
+  box.hidden = false;
+  if (soft) refresh();
+}
+
+function showStarted(sending) {
+  const files = sending.files || [];
+  const skipped = files.filter((f) => f.status === "failed").length + state.queue.filter((item) => item.status === "error").length;
   state.queue = [];
   state.draft = null;
+  state.estimate = null;
+  state.estimateFor = "";
   $("note").value = "";
   $("skipped").hidden = true;
+  $("send-error").hidden = true;
   renderQueue();
-  $("thanks-title").textContent = count === 1 ? "Takk! Filen er sendt." : "Takk! Filene er sendt.";
-  $("thanks-lead").textContent = sending.agentOnline === false
-    ? `${t} har fått beskjed. Oversettelsen starter når ${t} er klar – filene venter trygt her så lenge.`
-    : `${t} har fått beskjed.`;
+  const seconds = typeof sending.estimateSeconds === "number" ? sending.estimateSeconds : null;
+  say($("thanks-lead"), seconds != null
+    ? `Beregnet tid: ${dur(seconds)} – ferdig rundt ${at(Date.now() + seconds * 1000)}.`
+    : "");
+  say($("thanks-skipped"), skipped
+    ? `${skipped === 1 ? "Én fil" : `${skipped} filer`} kunne ikke oversettes og ble hoppet over.`
+    : "");
   $("compose").hidden = true;
   $("thanks").hidden = false;
   $("thanks-title").focus();
@@ -303,16 +541,32 @@ function etaText(progress) {
   const finish = state.fetchedAt + progress.etaSeconds * 1000;
   const left = (finish - Date.now()) / 1000;
   if (left < 20) return "Straks ferdig …";
-  return `${formatDuration(left)} igjen – ferdig rundt kl. ${formatClock(finish)}`;
+  return `${dur(left)} igjen – ferdig rundt ${at(finish)}`;
+}
+
+// Kort tekst i pillen; en eventuell forklaring vises under.
+function pillParts(file, percent) {
+  const text = file.statusText || "";
+  switch (file.status) {
+    case "working":
+      return [file.progress ? `Oversettes nå – ${percent} %` : "Oversettes nå", ""];
+    case "done":
+      return ["Ferdig", ""];
+    case "failed":
+      // «Kunne ikke oversettes. Jens har fått beskjed.» eller en grunn («Denne PDF-en er et bilde …»).
+      return ["Ikke oversatt", text.replace(/^Kunne ikke oversettes\.?\s*/, "")];
+    case "sent":
+      return [text || "I kø – starter straks", ""];
+    default:
+      return [text || "Ikke startet", ""];
+  }
 }
 
 function fileRow(file) {
   const fresh = state.fresh.has(file.id);
   const known = state.statuses.has(file.id);
-  const percent = file.progress ? Math.max(0, Math.min(100, Math.round(file.progress.percent))) : 0;
-  const pill = file.status === "working"
-    ? `${PILL.working}${file.progress ? ` · ${percent} %` : ""}`
-    : file.status === "done" ? PILL.done : file.statusText || PILL[file.status] || file.status;
+  const percent = file.progress ? Math.max(0, Math.min(100, Math.round(file.progress.percent || 0))) : 0;
+  const [pill, detail] = pillParts(file, percent);
   const outName = file.outputName || file.name;
   return h("li", { class: `row row-${file.status}${fresh ? " is-new" : ""}${known ? "" : " appear"}`, id: `file-${file.id}` },
     extBadge(file.name),
@@ -324,9 +578,10 @@ function fileRow(file) {
       h("p", { class: "row-status" },
         h("span", { class: `pill pill-${file.status}` }, h("span", { class: "dot", "aria-hidden": "true" }), pill),
         file.status === "done" && file.finishedAt
-          ? h("span", { class: "row-detail" }, `kl. ${formatClock(file.finishedAt)}${file.outputBytes ? ` · ${formatBytes(file.outputBytes)}` : ""}`)
+          ? h("span", { class: "row-detail" }, `${at(file.finishedAt)}${file.outputBytes ? ` · ${nbsp(formatBytes(file.outputBytes))}` : ""}`)
           : null
       ),
+      detail ? h("p", { class: "row-why" }, detail) : null,
       file.status === "working" ? [bar(percent, `Fremdrift for ${file.name}`), h("p", { class: "row-eta" }, etaText(file.progress))] : null
     ),
     file.status === "done"
@@ -337,9 +592,20 @@ function fileRow(file) {
   );
 }
 
+// Når flere filer er underveis: når blir hele sendingen ferdig?
+function sendingEta(s) {
+  const active = s.files.filter((f) => ACTIVE.has(f.status));
+  if (s.status === "draft" || typeof s.estimateSeconds !== "number" || !active.length) return null;
+  if (active.length < 2 && active[0].status === "working") return null; // filens egen linje sier det samme
+  const finish = state.fetchedAt + s.estimateSeconds * 1000;
+  const left = (finish - Date.now()) / 1000;
+  return h("p", { class: "sending-eta" }, icon("clock"),
+    left < 20 ? "Straks ferdig …" : `Alt er ferdig rundt ${at(finish)} (${dur(left)})`);
+}
+
 function sendingBlock(s) {
   const lang = LANGUAGE_LABELS[s.targetLanguage] || "";
-  const when = s.status === "draft" ? "Ikke sendt" : `Sendt kl. ${formatClock(s.sentAt || s.createdAt)}`;
+  const when = s.status === "draft" ? "Ikke startet" : `Startet kl. ${formatClock(s.sentAt || s.createdAt)}`;
   return h("article", { class: "sending" },
     h("div", { class: "sending-head" },
       h("p", { class: "sending-meta" }, [when, lang, plural(s.files.length, "fil", "filer")].filter(Boolean).map(nbsp).join(" · ")),
@@ -347,10 +613,13 @@ function sendingBlock(s) {
     ),
     s.note ? h("p", { class: "my-note" }, h("span", { class: "muted" }, "Din melding: "), `«${s.note}»`) : null,
     s.status === "draft"
-      ? h("div", { class: "draft-box" },
-        h("p", null, "Disse filene ble ikke sendt – kanskje ble siden lukket underveis."),
-        h("button", { type: "button", class: "btn btn-primary btn-small", "data-key": `send-${s.id}`, onclick: () => sendDraft(s) }, `Send til ${state.translator} nå`))
+      ? s.files.some((f) => f.status === "draft")
+        ? h("div", { class: "draft-box" },
+          h("p", null, "Disse filene er ikke oversatt ennå – kanskje ble siden lukket underveis."),
+          h("button", { type: "button", class: "btn btn-primary btn-small", "data-key": `send-${s.id}`, onclick: (e) => sendDraft(s, e.currentTarget) }, "Oversett nå"))
+        : h("div", { class: "draft-box" }, h("p", null, "Ingen av disse filene kan oversettes. Du kan slette dem."))
       : null,
+    sendingEta(s),
     h("ul", { class: "rows" }, s.files.map(fileRow)),
     s.reply
       ? h("div", { class: "reply" },
@@ -370,7 +639,7 @@ function renderMine() {
     fill($("groups"), h("div", { class: "empty" },
       h("img", { src: "/img/te.svg", alt: "", width: 160, height: 128 }),
       h("p", null, "Her dukker oversettelsene opp."),
-      h("p", { class: "muted" }, "Når du har sendt noe, kan du følge med her og laste ned når det er ferdig.")));
+      h("p", { class: "muted" }, "Når du har startet en oversettelse, kan du følge med her og laste ned når den er ferdig.")));
   } else {
     const days = new Map();
     for (const s of list) {
@@ -453,7 +722,7 @@ async function refresh() {
 
 async function removeSending(s) {
   const ok = await confirmDialog({
-    title: "Slette denne sendingen?",
+    title: "Slette disse filene?",
     text: `${plural(s.files.length, "fil", "filer")} og oversettelsene blir slettet for godt. Det kan ikke angres.`,
     confirm: "Ja, slett",
     cancel: "Nei, behold",
@@ -464,20 +733,22 @@ async function removeSending(s) {
     await api(`/api/sendings/${enc(s.id)}`, { method: "DELETE" });
     state.sendings = state.sendings.filter((other) => other.id !== s.id);
     renderMine();
-    toast("Sendingen er slettet.");
+    toast("Filene er slettet.");
     $("mine").focus();
   } catch (err) {
     toast(err.message);
   }
 }
 
-async function sendDraft(s) {
+async function sendDraft(s, button) {
+  button.disabled = true;
   try {
     await api(`/api/sendings/${enc(s.id)}/send`, { method: "POST" });
-    toast(`Sendt! ${state.translator} har fått beskjed.`);
+    toast("Oversettelsen er i gang.");
     refresh();
   } catch (err) {
     toast(err.message);
+    button.disabled = false;
   }
 }
 
@@ -534,10 +805,7 @@ function personalize({ user, translatorName, limits }) {
   const t = translatorName || "oversetteren";
   state.translator = t;
   $("hello").textContent = `Hei, ${user.displayName || user.username}!`;
-  $("hello-lead").textContent = `Her sender du dokumenter til ${t}, som oversetter dem til norsk. Ferdige oversettelser finner du under «Mine filer».`;
-  $("send-title").textContent = `Send dokumenter til ${t}`;
   $("note-label").textContent = `Melding til ${t} (valgfritt)`;
-  $("btn-send").textContent = `Send til ${t}`;
   $("admin-link").hidden = user.role !== "admin";
 }
 
@@ -590,7 +858,10 @@ window.addEventListener("drop", (e) => {
 const savedLang = recall(LANG_KEY);
 for (const radio of document.querySelectorAll('input[name="lang"]')) {
   radio.checked = radio.value === (savedLang === "nynorsk" ? "nynorsk" : "bokmal");
-  radio.addEventListener("change", () => remember(LANG_KEY, radio.value));
+  radio.addEventListener("change", () => {
+    remember(LANG_KEY, radio.value);
+    renderSummary();
+  });
 }
 
 $("btn-send").addEventListener("click", send);
@@ -613,7 +884,7 @@ $("welcome-go").addEventListener("click", (e) => {
 });
 
 window.addEventListener("beforeunload", (e) => {
-  if (state.sending) e.preventDefault();
+  if (state.sending || isBusyUploading()) e.preventDefault();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) schedule();

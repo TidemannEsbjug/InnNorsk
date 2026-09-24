@@ -847,19 +847,50 @@ textarea:disabled {
   height: 17px;
 }
 
-.q-done .q-meta {
+.q-ready .q-meta {
   color: var(--sage-ink);
   font-weight: 700;
 }
 
+.q-waiting .q-meta {
+  color: #866a57;
+}
+
+.q-skip,
 .q-error {
   background: var(--rose-soft);
   border-color: #efc9bc;
 }
 
+.q-skip .q-meta,
 .q-error .q-meta {
+  display: block;
   color: var(--rose-ink);
   font-weight: 600;
+}
+
+.q-hint {
+  font-size: 14.5px;
+  color: var(--ink-soft);
+}
+
+.q-skip .ext,
+.q-error .ext {
+  background: var(--surface);
+}
+
+.q-action {
+  justify-self: start;
+  margin: 2px 0 0 -10px;
+}
+
+.q-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.is-skipped {
+  padding-right: 14px;
 }
 
 .q .bar {
@@ -993,11 +1024,82 @@ textarea:disabled {
   animation: appear 0.4s ease-out both;
 }
 
-.send-summary {
+.send-error {
+  margin-bottom: 16px;
+  background: var(--rose-soft);
+  color: var(--rose-ink);
+  border: 1px solid #efc9bc;
+  font-weight: 600;
+}
+
+.send-error.is-soft {
+  background: var(--honey-soft);
+  color: var(--ink);
+  border-color: #f0dcb2;
+  font-weight: 400;
+}
+
+.send-error.is-soft p:first-child {
+  font-weight: 700;
+}
+
+.estimate {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
   text-align: center;
-  color: var(--ink-soft);
+  margin: 2px 0 14px;
+}
+
+.estimate:empty {
+  display: none;
+}
+
+.estimate-time {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0 8px;
+  font-family: var(--font-display);
+  font-variation-settings: "SOFT" 100;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.estimate-time strong {
+  font-weight: 700;
+  color: var(--terra-ink);
+}
+
+.estimate-time .icon {
+  width: 24px;
+  height: 24px;
+  color: var(--terra);
+}
+
+.estimate-sub {
   font-size: 16px;
-  margin-bottom: 10px;
+  color: var(--ink-soft);
+}
+
+.estimate-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  color: var(--ink-soft);
+}
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  flex: none;
+  border-radius: 50%;
+  border: 2.5px solid #f3d3bb;
+  border-top-color: var(--terra);
+  animation: spin 0.8s linear infinite;
 }
 
 .thanks {
@@ -1022,6 +1124,11 @@ textarea:disabled {
 .thanks .lead {
   margin: 0;
   max-width: 500px;
+}
+
+.thanks-skipped {
+  font-size: 16px;
+  color: var(--ink-soft);
 }
 
 .reassure {
@@ -1152,9 +1259,25 @@ textarea:disabled {
 }
 
 .row-detail,
-.row-eta {
+.row-eta,
+.row-why {
   font-size: 15px;
   color: var(--ink-soft);
+}
+
+.sending-eta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  justify-self: start;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--honey-ink);
+}
+
+.sending-eta .icon {
+  width: 17px;
+  height: 17px;
 }
 
 .row-actions {
@@ -1444,34 +1567,79 @@ textarea:disabled {
   display: none;
 }
 
-.agent {
+.xai {
   display: grid;
-  gap: 16px;
+  gap: 14px;
 }
 
-.agent-status {
+.xai .card-head {
+  margin-bottom: 0;
+}
+
+.status-head {
   display: flex;
   align-items: center;
   gap: 16px;
 }
 
-.agent-status h2 {
-  font-size: 26px;
+.admin .status-head h2 {
+  font-size: 24px;
 }
 
-.agent-dot {
+.status-dot {
   width: 18px;
   height: 18px;
   flex: none;
   border-radius: 50%;
+  background: var(--line-strong);
+  box-shadow: 0 0 0 6px var(--surface-2);
+}
+
+.is-ok .status-dot {
+  background: #5d8a5f;
+  box-shadow: 0 0 0 6px var(--sage-soft);
+  animation: breathe 2.4s ease-in-out infinite;
+}
+
+.is-bad .status-dot {
   background: #b9573a;
   box-shadow: 0 0 0 6px var(--rose-soft);
 }
 
-.is-online .agent-dot {
-  background: #5d8a5f;
-  box-shadow: 0 0 0 6px var(--sage-soft);
-  animation: breathe 2.4s ease-in-out infinite;
+.key-banner code,
+.xai code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.test-result {
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  font-size: 15.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.test-result.is-ok {
+  background: var(--sage-soft);
+  color: var(--sage-ink);
+}
+
+.test-result.is-bad {
+  background: var(--rose-soft);
+  color: var(--rose-ink);
+}
+
+.last-error {
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: #fff4ef;
+  border: 1px solid #f3d6cb;
+  overflow-wrap: anywhere;
 }
 
 .facts {
@@ -1497,6 +1665,18 @@ textarea:disabled {
   margin: 0;
   font-weight: 700;
   overflow-wrap: anywhere;
+}
+
+.facts dd.good {
+  color: var(--sage-ink);
+}
+
+.xai .facts {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.xai .facts .muted {
+  font-weight: 600;
 }
 
 .stats {
@@ -1661,6 +1841,84 @@ textarea:disabled {
 .afile .pill {
   font-size: 13.5px;
   padding: 1px 10px 1px 8px;
+}
+
+.metrics {
+  color: var(--ink-soft);
+}
+
+.calls-body {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fffdf9;
+}
+
+.calls-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.calls-table th,
+.calls-table td {
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.calls-table th {
+  font-weight: 800;
+  color: var(--ink-soft);
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.calls-table tbody + tbody td {
+  border-top: 1px solid var(--line);
+}
+
+.calls-table .num {
+  text-align: right;
+}
+
+.calls-table .good {
+  color: var(--sage-ink);
+  font-weight: 700;
+}
+
+.calls-table .bad {
+  font-weight: 700;
+}
+
+.calls-table tbody.is-bad td {
+  background: #fff4ef;
+}
+
+.calls-table .err-row td {
+  padding-top: 0;
+  white-space: normal;
+}
+
+/* Klistrer seg til venstre kant og holder seg innenfor det synlige feltet når tabellen rulles sidelengs. */
+.err-text {
+  position: sticky;
+  left: 10px;
+  max-width: min(640px, calc(100vw - 150px));
+  overflow-wrap: anywhere;
+  color: var(--rose-ink);
+}
+
+.err-label {
+  font-weight: 800;
 }
 
 details summary {
@@ -2098,6 +2356,10 @@ pre {
 
   .acard-head {
     flex-direction: column;
+  }
+
+  .xai .facts {
+    grid-template-columns: 1fr 1fr;
   }
 
   .grid-2 {
