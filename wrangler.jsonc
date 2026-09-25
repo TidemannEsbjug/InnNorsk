@@ -32,10 +32,10 @@
     "MAX_CHARS_PER_DAY": "300000",
     "MAX_CHARS_PER_MONTH": "2000000",
     "MAX_STORAGE_GB": "5",
-    "XAI_MODEL": "grok-4.6",
+    "XAI_MODEL": "grok-4.20-0309-non-reasoning",
     "GROK_CONCURRENCY": "2",
-    "XAI_PRICE_INPUT_PER_M": "",
-    "XAI_PRICE_OUTPUT_PER_M": "",
+    "XAI_PRICE_INPUT_PER_M": "1.25",
+    "XAI_PRICE_OUTPUT_PER_M": "2.50",
     "APNS_BUNDLE_ID": "no.innnorsk.varsel",
     "APNS_ENV": "sandbox"
   }

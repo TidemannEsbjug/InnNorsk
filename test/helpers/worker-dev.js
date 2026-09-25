@@ -108,6 +108,7 @@ async function start({ vars = {}, users = DEFAULT_USERS, xai: xaiOptions = {} } 
     if (!vars.XAI_BASE_URL) xai = await mockXai.start(xaiOptions);
     const all = {
       XAI_API_KEY,
+      XAI_MODEL: "grok-4.6", // testene er uavhengige av modellen i wrangler.jsonc
       ...(xai ? { XAI_BASE_URL: xai.url } : {}),
       ...PRICES,
       APNS_KEY_P8: key.pem,

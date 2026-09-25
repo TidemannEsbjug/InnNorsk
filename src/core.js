@@ -3,7 +3,7 @@
 const { translateDocxBuffer } = require("./formats/docx");
 const { translatePptxBuffer } = require("./formats/pptx");
 const { translateXlsxBuffer } = require("./formats/xlsx");
-const { translatePdfToDocx } = require("./formats/pdf");
+const { translatePdf } = require("./formats/pdf");
 const { validateOutput } = require("./validate");
 const { planBatches } = require("./grok");
 const {
@@ -17,7 +17,7 @@ const HANDLERS = {
   ".docx": { outExt: ".docx", run: (buf, ctx) => translateDocxBuffer(buf, ctx) },
   ".pptx": { outExt: ".pptx", run: (buf, ctx) => translatePptxBuffer(buf, ctx) },
   ".xlsx": { outExt: ".xlsx", run: (buf, ctx) => translateXlsxBuffer(buf, ctx) },
-  ".pdf": { outExt: ".docx", run: (buf, ctx) => translatePdfToDocx(buf, ctx) },
+  ".pdf": { outExt: ".pdf", run: (buf, ctx) => translatePdf(buf, ctx) },
   ".txt": { outExt: ".txt", run: (buf, ctx) => translatePlain(buf, ctx) },
   ".md": { outExt: ".md", run: (buf, ctx) => translatePlain(buf, ctx) },
   ".csv": { outExt: ".csv", run: (buf, ctx) => translateCsv(buf, ctx) },

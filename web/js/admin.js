@@ -722,8 +722,8 @@ function welcomeMessage(user, password, mustChange, reset) {
     `Hei, ${user.displayName || user.username}!`,
     "",
     reset
-      ? "Her er et nytt passord til InnNorsk:"
-      : "Her er innloggingen din til InnNorsk, der du kan få dokumenter oversatt til norsk:",
+      ? "Her er et nytt passord til Oversetter:"
+      : "Her er innloggingen din til Oversetter, der du kan få dokumenter oversatt til norsk:",
     "",
     `Adresse: ${location.origin}/login`,
     `Brukernavn: ${user.username}`,

@@ -39,6 +39,11 @@ async function validateOutput(buffer, outExt) {
     errors.push("Tom fil");
   } else if (OOXML.has(ext)) {
     errors = await validateOoxml(buffer);
+  } else if (ext === ".pdf") {
+    const head = Buffer.from(buffer.subarray(0, 1024)).toString("latin1");
+    const tail = Buffer.from(buffer.subarray(Math.max(0, buffer.length - 1024))).toString("latin1");
+    if (!head.includes("%PDF-")) errors.push("Mangler PDF-hode (%PDF-)");
+    if (!tail.includes("%%EOF")) errors.push("Mangler PDF-slutt (%%EOF)");
   }
   return { ok: errors.length === 0, errors };
 }

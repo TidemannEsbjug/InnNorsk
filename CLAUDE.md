@@ -28,7 +28,7 @@ src/                      Delt kjerne (CommonJS; bundles inn i Workeren, brukes 
   core.js                 HANDLERS/SUPPORTED, collectStrings, analyzeBuffer, applyTranslations, translateBuffer, utfilnavn
   grok.js                 xAI Responses API: planBatches, translateBatch (retry, split ved feil antall, GrokError), transport-hook
   validate.js             sjekker at .docx/.pptx/.xlsx er gyldig XML før levering
-  formats/*.js            docx, pptx, xlsx, pdf (unpdf, ekte fontnavn), text (txt/md/csv/html/rtf), simple-docx
+  formats/*.js            docx, pptx, xlsx, pdf (PDF → PDF: unpdf leser, pdf-lib skriver), text (txt/md/csv/html/rtf), simple-docx
   pipeline.js main.js preload.js settings.js renderer/   Electron (Windows-appen)
 worker/                   Cloudflare Worker (ESM, Hono)
   index.js app.js         inngang, sikkerhetsheadere, sider, ruter; eksporterer Workflow TranslateSending
@@ -71,6 +71,7 @@ Deploy: se [docs/DEPLOY.md](docs/DEPLOY.md).
 - Voice-nøkkel → 403 på chat. xAI 403-body er `{ error: "string" }`.
 - Word: linjeskift er `<w:br/>`; skriv oversettelsen i **lengste run**; ikke slå sammen avsnitt før Grok-kall.
 - collect/apply krever at handleren er deterministisk: samme fil → samme kallrekkefølge og strenger.
+- PDF → PDF: all tekst fjernes fra innholdsstrømmene (Tj/TJ/'/", også i Form XObjects) og tegnes på nytt med standardskriftene (Helvetica/Times/Courier, WinAnsi: æøå ok, kyrillisk blir «?»). Låst/ødelagt PDF → ny PDF uten grafikk. OCR-lag (usynlig tekst) dekkes med hvitt.
 - Workflow: hvert batchsvar ligger i R2 (`work/<fil>/b-<idx>.json`) og hoppes over ved nye forsøk — ikke fjern det (ellers betales det dobbelt). Trinn-navn må være faste og unike.
 - Auth: klienten sender `proof = base64url(PBKDF2-SHA256(passord, salt, 310000, 32 B))`; serveren lagrer bare `sha256(proof)`. Ingen Unicode-normalisering.
 - Alle ikke-GET `/api/*` krever headeren `X-InnNorsk: 1`.

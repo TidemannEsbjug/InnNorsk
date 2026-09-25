@@ -687,7 +687,7 @@ function trackDone() {
     remember(SEEN_KEY, JSON.stringify([...state.seen]));
   }
   const ready = done.filter((f) => !state.seen.has(f.id)).length;
-  document.title = ready ? `(${ready} ${ready === 1 ? "klar" : "klare"}) InnNorsk` : "InnNorsk";
+  document.title = ready ? `(${ready} ${ready === 1 ? "klar" : "klare"}) Oversetter` : "Oversetter";
 }
 
 function schedule() {

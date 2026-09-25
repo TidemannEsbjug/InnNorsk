@@ -5,6 +5,7 @@ const mock = require("./helpers/mock-grok");
 const { minimalDocx, minimalPdf } = require("./helpers/fixtures");
 const { translateStrings, planBatches, GrokError } = require("../src/grok");
 const core = require("../src/core");
+const { extractPages, stripText } = require("../src/formats/pdf");
 
 const ctx = (extra = {}) => ({ apiKey: "test", model: "grok-4.6", retryDelayMs: 1, ...extra });
 
@@ -82,6 +83,7 @@ test("collect + apply gir samme resultat som direkte oversettelse", async () => 
     [Buffer.from('name,comment\n"Ola","Good morning"\n'), ".csv"],
     [Buffer.from("<html><body><p>Hello there</p></body></html>"), ".html"],
     [docx, ".docx"],
+    [minimalPdf(), ".pdf"],
   ];
   for (const [buf, ext] of cases) {
     mock.reset();
@@ -97,6 +99,10 @@ test("collect + apply gir samme resultat som direkte oversettelse", async () => 
       assert.equal(a, d);
       assert.match(a, /NB:SECOND PARAGRAPH ÆØÅ/);
       assert.match(a, /<w:b\/>/);
+    } else if (ext === ".pdf") {
+      const text = async (b) => (await extractPages(b)).flatMap((p) => p.items.map((i) => `${i.str}@${Math.round(i.x)},${Math.round(i.y)}`)).join("|");
+      assert.equal(await text(applied.buffer), await text(direct.buffer));
+      assert.match(await text(applied.buffer), /NB:WEATHER REPORT/);
     } else {
       assert.equal(applied.buffer.toString(), direct.buffer.toString(), ext);
     }
@@ -115,22 +121,38 @@ test("analyzeBuffer teller uten API-kall", async () => {
   assert.equal(mock.state.calls, 0);
 });
 
-test("PDF via unpdf: ekte fontnavn gir fet overskrift i Word", async () => {
+test("PDF inn gir PDF ut: samme side, teksten oversatt på samme sted og i samme stil, originalteksten fjernet", async () => {
   const pdf = minimalPdf();
   const a = await core.analyzeBuffer(pdf, ".pdf");
-  assert.ok(a.segments >= 2);
+  assert.equal(a.segments, 2, "overskrift + ett avsnitt (to linjer som flyter sammen)");
   const out = await core.translateBuffer(pdf, ".pdf", ctx());
-  const xml = await (await JSZip.loadAsync(out.buffer)).file("word/document.xml").async("string");
-  assert.match(xml, /NB:WEATHER REPORT/);
-  const heading = xml.slice(0, xml.indexOf("NB:WEATHER REPORT"));
-  assert.match(heading.slice(heading.lastIndexOf("<w:r>")), /<w:b\/>/);
-  assert.match(xml, /w:ascii="Arial"/);
+  assert.equal(out.outExt, ".pdf");
+  const [page] = await extractPages(out.buffer);
+  assert.deepEqual([Math.round(page.width), Math.round(page.height)], [595, 842]);
+  const texts = page.items.filter((i) => i.str.trim());
+  assert.ok(!texts.some((i) => /Weather|Bergen\./.test(i.str)), "originalteksten er borte");
+  const heading = texts.find((i) => i.str.startsWith("NB:WEATHER REPORT"));
+  assert.ok(heading, JSON.stringify(texts.map((i) => i.str)));
+  assert.deepEqual([Math.round(heading.x), Math.round(heading.y), Math.round(heading.size), heading.style.bold], [72, 780, 18, true]);
+  const body = texts.filter((i) => i.style.size < 12).map((i) => i.str).join(" ");
+  assert.match(body, /NB:THIS IS THE FIRST LINE ABOUT BERGEN\. AND THIS IS THE SECOND LINE\./);
+  const first = texts.find((i) => i.str.startsWith("NB:THIS"));
+  assert.deepEqual([Math.round(first.x), Math.round(first.y), first.style.bold], [72, 750, false]);
+});
+
+test("PDF: bare tekstoperatorene fjernes; grafikk, tilstand og innebygde bilder står igjen", () => {
+  const src = Buffer.from("q 1 0 0 rg 0 0 10 10 re f BT /F1 12 Tf 10 10 Td (Hei \\) (på) deg) Tj [(A) -20 (B)] TJ (x) ' 1 2 (y) \" ET BI /W 1 /H 1 /CS /G /BPC 8 ID \u0000Tj( EI q 0.5 g", "latin1");
+  const { bytes, open, removed } = stripText(src);
+  const out = bytes.toString("latin1");
+  assert.equal(removed, 4);
+  assert.equal(out, "q 1 0 0 rg 0 0 10 10 re f BT /F1 12 Tf 10 10 Td   T* T* ET BI /W 1 /H 1 /CS /G /BPC 8 ID \u0000Tj( EI q 0.5 g");
+  assert.equal(open, 2, "to q uten Q: tegningen vår lukker dem");
 });
 
 test("utfilnavn kolliderer ikke, låsefiler ignoreres", () => {
   const names = core.assignOutputNames(["a/x.pdf", "a/x.docx", "a/X.rtf", "b.htm", "b.html"]);
   assert.equal(names.get("a/x.docx"), "a/x.docx");
-  assert.equal(names.get("a/x.pdf"), "a/x (pdf).docx");
+  assert.equal(names.get("a/x.pdf"), "a/x.pdf", "PDF blir PDF");
   assert.equal(names.get("a/X.rtf"), "a/X (rtf).docx");
   assert.equal(names.get("b.html"), "b.html");
   assert.equal(names.get("b.htm"), "b (htm).html");
