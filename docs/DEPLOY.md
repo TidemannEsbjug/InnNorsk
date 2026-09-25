@@ -7,6 +7,22 @@ Alt kjører hos Cloudflare: nettside og API (Worker), database (D1), filer (R2) 
 - **Cloudflare Workers Paid: $5/mnd** (kreves for CPU-tid og Workflows). R2 (10 GB) og D1 er godt innenfor inkluderte kvoter for én bruker. Sjekk gjeldende priser på cloudflare.com.
 - **xAI:** betaling per token. Admin viser tokens per fil, og kostnad når du fyller inn `XAI_PRICE_INPUT_PER_M` / `XAI_PRICE_OUTPUT_PER_M` (USD per million tokens) i `wrangler.jsonc`.
 
+## Tak mot uventet regning
+
+Cloudflare har **ingen hard utgiftsgrense** på Workers Paid; alt over det inkluderte faktureres. For én bruker er det inkluderte (10 mill. forespørsler, 30 mill. CPU-ms, 10 GB R2) svært romslig. Det som faktisk koster, er mye tekst til xAI og mye lagring, så appen har egne tak (i `wrangler.jsonc`, endres med ny `npm run deploy`):
+
+| Variabel | Standard | Betyr |
+|---|---|---|
+| `MAX_CHARS_PER_DAY` | 300000 | tegn som kan sendes til oversettelse siste 24 t (ca. 120 sider) |
+| `MAX_CHARS_PER_MONTH` | 2000000 | tegn siste 30 dager (ca. 800 sider) |
+| `MAX_STORAGE_GB` | 5 | samlet lagring (originaler + oversettelser), godt under R2-gratiskvoten på 10 GB |
+
+Også «Sett i kø igjen» teller, og sletting gir ikke kvoten tilbake. Når et tak nås, får Svetlana en vennlig melding, og hendelsen `quota.*` havner i Admin → Logg. Forbruket mot takene vises i Admin → Oversikt.
+
+I tillegg (gjøres i nettleseren):
+- **Cloudflare:** Manage Account → Notifications → Add → **Usage Based Billing** → e-post når bruken av Workers/R2/D1 passerer en terskel.
+- **xAI:** bruk forhåndsbetalte kreditter **uten automatisk påfyll** (console.x.ai → Billing). Da kan xAI aldri koste mer enn det du har fylt på.
+
 ## Første gang (på din Mac, i repo-mappen)
 
 1. Kjøp **Workers Paid** i Cloudflare-dashbordet (Workers & Pages → Plans).

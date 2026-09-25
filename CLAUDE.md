@@ -37,8 +37,9 @@ worker/                   Cloudflare Worker (ESM, Hono)
   sendings.js files.js    sendinger/filer, statustekster, stier, opplasting/nedlasting
   auth.js                 PBKDF2-bevis fra klienten + SHA-256 på server, økter, sperre, CSRF
   log.js cron.js apns.js  hendelser (D1 + konsoll-JSON), opprydding/avstemming, valgfri iPhone-push
+  quota.js                tak mot uventet forbruk: tegn til xAI per døgn/30 dager (quota_usage), samlet lagring
   routes/                 auth, sendings, admin, clientlog
-migrations/               D1: 0001_init.sql, 0002_cloud_translate.sql (endre aldri en migrasjon som er kjørt)
+migrations/               D1: 0001_init.sql, 0002_cloud_translate.sql, 0003_quota.sql (endre aldri en migrasjon som er kjørt)
 web/                      Statisk UI (login, index, admin), vanilla JS, ingen byggesteg
 scripts/make-user.js      oppretter/endrer brukere lokalt → wrangler d1 execute (passordet forlater aldri maskinen)
 ios/                      valgfri SwiftUI-app for eierens push-varsler (ikke kompilert i CI)

@@ -8,6 +8,7 @@ const CTX = { source: "system" };
 const DRAFT_DAYS = 2;
 const SESSION_KEEP_DAYS = 30;
 const EVENT_KEEP_DAYS = 365;
+const QUOTA_KEEP_DAYS = 31; // månedstaket ser 30 dager bakover
 const STALLED_MS = 30 * 60000;
 const ALIVE = ["queued", "running", "paused", "waiting", "waitingForPause"];
 // Filer som fortsatt kan trenge mellomlagrede batcher (en feilet fil kan settes i kø igjen).
@@ -78,14 +79,16 @@ async function purgeOldDrafts(env) {
 
 export async function runCron(env) {
   const counts = { stalled: await reconcile(env), workFolders: await sweepWork(env), ...(await purgeOldDrafts(env)) };
-  const [attempts, sessions, events, batches] = await batch(env, [
+  const [attempts, sessions, events, batches, quota] = await batch(env, [
     ["DELETE FROM login_attempts WHERE ts < ?", isoAgo(DAY_MS)],
     ["DELETE FROM sessions WHERE expires_at < ? OR revoked_at < ?", isoAgo(SESSION_KEEP_DAYS * DAY_MS), isoAgo(SESSION_KEEP_DAYS * DAY_MS)],
     ["DELETE FROM events WHERE ts < ?", isoAgo(EVENT_KEEP_DAYS * DAY_MS)],
     [`DELETE FROM batches WHERE file_id NOT IN (${OPEN_FILES})`],
+    ["DELETE FROM quota_usage WHERE ts < ?", isoAgo(QUOTA_KEEP_DAYS * DAY_MS)],
   ]);
   Object.assign(counts, {
     loginAttempts: attempts.meta.changes, sessions: sessions.meta.changes, events: events.meta.changes, batches: batches.meta.changes,
+    quotaRows: quota.meta.changes,
   });
   if (Object.values(counts).some((n) => n > 0)) await logEvent(env, "info", "retention.sweep", "Opprydding", counts, CTX);
   return counts;

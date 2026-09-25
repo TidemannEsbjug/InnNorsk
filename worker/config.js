@@ -17,6 +17,9 @@ export function config(env) {
   return {
     maxFileMb: num(env, "MAX_FILE_MB", 25),
     maxFilesPerSending: Math.floor(num(env, "MAX_FILES_PER_SENDING", 50)),
+    maxCharsPerDay: Math.floor(num(env, "MAX_CHARS_PER_DAY", 300000)),
+    maxCharsPerMonth: Math.floor(num(env, "MAX_CHARS_PER_MONTH", 2000000)),
+    maxStorageGb: num(env, "MAX_STORAGE_GB", 5),
     model: env.XAI_MODEL || "grok-4.6",
     concurrency: Math.floor(num(env, "GROK_CONCURRENCY", 2)),
     priceInputPerM: price(env, "XAI_PRICE_INPUT_PER_M"),

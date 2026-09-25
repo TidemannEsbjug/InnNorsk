@@ -9,6 +9,7 @@ import { requireUser } from "../auth.js";
 import { pushToAdmins } from "../apns.js";
 import { predictFile, predictSending } from "../estimate.js";
 import { estimatorParams } from "../xai.js";
+import { checkStorage, reserveTranslation, releaseTranslation } from "../quota.js";
 import {
   SUPPORTED, baseName, extOf, isIgnoredName, sanitizePath, r2Key, deleteObjects, deleteWork, contentLength, sizeProblem, putObject,
   readBody, download,
@@ -84,6 +85,7 @@ api.put("/sendings/:id/files", requireUser, async (c) => {
   const tooBig = `Filen er for stor (maks ${cfg.maxFileMb} MB).`;
   const sizeIssue = sizeProblem(contentLength(c), cfg.maxFileMb * 1024 * 1024, tooBig);
   if (sizeIssue) await reject(...sizeIssue);
+  await checkStorage(env, contentLength(c), ctx);
   const relPath = sanitizePath(rawPath);
   if (!relPath) await reject(400, "Filnavnet mangler eller er ugyldig.");
   const name = baseName(relPath);
@@ -160,24 +162,29 @@ api.post("/sendings/:id/send", requireUser, async (c) => {
   const env = c.env;
   const s = await loadSending(c, c.req.param("id"), { write: true });
   if (s.status !== "draft") fail(409, "Denne sendingen er allerede sendt.");
-  const files = await all(env, "SELECT id, name, bytes, status, plan_json FROM files WHERE sending_id = ? ORDER BY rel_path", s.id);
+  const files = await all(env, "SELECT id, name, bytes, status, chars, plan_json FROM files WHERE sending_id = ? ORDER BY rel_path", s.id);
   if (!files.length) fail(400, "Legg til minst én fil før du sender.");
   const ready = files.filter((f) => f.status === "draft");
   if (!ready.length) fail(400, "Ingen av filene kan oversettes. Fjern dem og legg til andre.");
   if (!env.XAI_API_KEY) fail(503, `Oversettelsen er ikke satt opp ennå. Si fra til ${await translatorName(env)}.`);
+  const ctx = reqCtx(c, { sendingId: s.id });
+  const reservation = await reserveTranslation(env, ready.reduce((n, f) => n + (f.chars || 0), 0), ctx);
   const estimate = predictSending(ready.map((f) => parseJson(f.plan_json, [])), await estimatorParams(env), config(env).concurrency);
   const [res] = await batch(env, [
     ["UPDATE sendings SET status = 'sent', sent_at = ?, estimate_seconds = ? WHERE id = ? AND status = 'draft'", nowIso(), estimate, s.id],
     ["UPDATE files SET status = 'sent', message = NULL WHERE sending_id = ? AND status = 'draft'", s.id],
   ]);
-  if (!res.meta.changes) fail(409, "Denne sendingen er allerede sendt.");
-  const ctx = reqCtx(c, { sendingId: s.id });
+  if (!res.meta.changes) {
+    await releaseTranslation(env, reservation);
+    fail(409, "Denne sendingen er allerede sendt.");
+  }
   try {
     await startWorkflow(env, s.id, s.workflow_id);
   } catch (err) {
     await batch(env, [
       ["UPDATE sendings SET status = 'draft', sent_at = NULL WHERE id = ?", s.id],
       ["UPDATE files SET status = 'draft', message = 'Klar' WHERE sending_id = ? AND status = 'sent'", s.id],
+      ["DELETE FROM quota_usage WHERE id = ?", reservation],
     ]);
     await logEvent(env, "error", "sending.start_failed", "Oversettelsen kunne ikke startes", { error: String(err && err.message) }, ctx);
     fail(503, "Oversettelsen kunne ikke startes akkurat nå. Prøv igjen om litt.");

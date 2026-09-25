@@ -6,7 +6,7 @@
 |---|---|---|
 | Worker (`worker/`) | Cloudflare Workers Paid, Hono, ESM | sider, API, innlogging, opplasting/nedlasting, admin, cron |
 | Workflow `TranslateSending` (`worker/translate.js`) | Cloudflare Workflows | oversetter én sending, fil for fil, med varige trinn |
-| D1 (`migrations/`) | SQLite | brukere, økter, sendinger, filer, batcher, `grok_calls`, hendelser, enheter |
+| D1 (`migrations/`) | SQLite | brukere, økter, sendinger, filer, batcher, `grok_calls`, `quota_usage`, hendelser, enheter |
 | R2 (`innnorsk-files`) | objektlager | `s/<sending>/<fil>/original`, `…/result`, `work/<fil>/…` (mellomlager) |
 | Kjerne (`src/`) | CommonJS, bundlet inn | uttrekk og innsetting av tekst med formatering, Grok-klient, validering |
 | UI (`web/`) | statisk HTML/CSS/JS | Svetlanas side og admin |
@@ -35,7 +35,8 @@ Per batch `t = a + b·tegn` (standard 8 s + 0,006 s/tegn), tilpasset med minste 
 - Økter: tilfeldig token i `HttpOnly`/`SameSite=Lax`-cookie, bare hash i D1.
 - CSRF: `X-InnNorsk: 1` på alle ikke-GET API-kall. Streng CSP og sikkerhetsheadere på alle svar.
 - Svetlana ser bare egne sendinger. xAI-nøkkel og APNs-nøkkel er Worker-secrets.
+- Tak mot uventet forbruk (`worker/quota.js`): hver sending og hvert «Sett i kø igjen» reserverer filenes tegn i `quota_usage` (sjekk og reservasjon i én SQL-setning). Over `MAX_CHARS_PER_DAY` (24 t) eller `MAX_CHARS_PER_MONTH` (30 dager) → 429 og `quota.translation` i loggen. Sletting frigjør ikke kvote. Opplasting som ville gi mer enn `MAX_STORAGE_GB` lagret → 507 og `quota.storage`. Forbruket vises i Admin → Oversikt.
 
 ## Opprydding (cron hvert 15. min)
 
-Oversettelser som har hengt i over 30 min markeres som feilet. Gamle utkast, innloggingsforsøk, utløpte økter og gamle hendelser slettes. Ferdige filer beholdes til brukeren sletter dem.
+Oversettelser som har hengt i over 30 min markeres som feilet. Gamle utkast, innloggingsforsøk, utløpte økter, gamle hendelser og `quota_usage` eldre enn 31 dager slettes. Ferdige filer beholdes til brukeren sletter dem.

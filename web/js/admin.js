@@ -245,15 +245,25 @@ function say(el, text) {
   el.hidden = !text;
 }
 
-function renderStats({ counts = {}, storage = {}, users }) {
+function renderStats({ counts = {}, storage = {}, users, limits = {} }) {
   const tile = (value, label, cls = "") => h("div", { class: `stat ${cls}` }, h("span", { class: "stat-value" }, value), h("span", { class: "stat-label" }, label));
+  // Tak mot uventet forbruk (MAX_CHARS_PER_DAY, MAX_CHARS_PER_MONTH, MAX_STORAGE_GB i wrangler.jsonc).
+  const limitTile = (l, label, format) => {
+    if (!l || !l.cap) return null;
+    const pct = Math.min(100, Math.round((100 * l.used) / l.cap));
+    return tile(`${pct} %`, `${label} · ${format(l.used)} av ${format(l.cap)}`, pct >= 90 ? "stat-bad" : "");
+  };
+  const chars = (n) => `${formatNumber(n)} tegn`;
   fill($("stats"),
     tile(formatNumber(counts.waiting), "I kø"),
     tile(formatNumber(counts.working), "Oversettes nå"),
     tile(formatNumber(counts.doneToday), "Ferdig i dag"),
     tile(formatNumber(counts.failed), "Feilet", counts.failed ? "stat-bad" : ""),
     tile(formatBytes(storage.bytes), `Lagret · ${plural(storage.files || 0, "fil", "filer")}`),
-    typeof users === "number" ? tile(formatNumber(users), "Brukere") : null
+    typeof users === "number" ? tile(formatNumber(users), "Brukere") : null,
+    limitTile(limits.day, "Tak siste døgn", chars),
+    limitTile(limits.month, "Tak siste 30 dager", chars),
+    limitTile(limits.storage, "Lagringstak", formatBytes)
   );
 }
 

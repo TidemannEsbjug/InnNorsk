@@ -1,4 +1,4 @@
-// Eierens admin: oversikt (xAI-forbruk, kø, lagring, estimatmodell), sendinger med Grok-kall, manuell opplasting,
+// Eierens admin: oversikt (xAI-forbruk, kø, lagring, tak, estimatmodell), sendinger med Grok-kall, manuell opplasting,
 // sett i kø igjen, test av xAI, logg, økter, brukere og iPhone-enheter.
 import { Hono } from "hono";
 import grok from "../../src/grok.js";
@@ -11,6 +11,7 @@ import { pushToUser } from "../apns.js";
 import { baseName, sanitizePath, r2Key, contentLength, sizeProblem, putBody } from "../files.js";
 import { listSendings, loadFile, markDone, finishIfDone, sendingView, startWorkflow } from "../sendings.js";
 import { costUsd, estimatorParams, grokOptions, recordCall } from "../xai.js";
+import { quotaStatus, reserveTranslation, releaseTranslation } from "../quota.js";
 
 const SOURCES = ["web", "ios", "system"];
 // Oversettelser kan bli større enn originalen (PDF → Word).
@@ -146,6 +147,7 @@ admin.get("/overview", async (c) => {
     devices: devices.results.map(serializeDevice),
     users: users.results[0].n,
     estimator: { a: Number(params.a.toFixed(2)), b: Number(params.b.toFixed(5)), samples: params.samples, source: params.source },
+    limits: await quotaStatus(env),
   });
 });
 
@@ -187,9 +189,10 @@ admin.post("/files/:fileId/status", async (c) => {
   if (notSentYet(f)) fail(409, "Filen er ikke sendt ennå.");
   if (body.status === "done" && !f.output_name) fail(409, "Filen har ingen oversettelse ennå. Last opp en først.");
   if (body.status === "sent" && !env.XAI_API_KEY) fail(503, "XAI_API_KEY er ikke satt på serveren (npx wrangler secret put XAI_API_KEY).");
+  const ctx = reqCtx(c, { sendingId: f.sending_id, fileId: f.id });
+  const reservation = body.status === "sent" ? await reserveTranslation(env, f.chars || 0, ctx, { admin: true }) : null;
   const [assignments, args] = change;
   await run(env, `UPDATE files SET ${assignments}, message = ? WHERE id = ?`, ...args, message, f.id);
-  const ctx = reqCtx(c, { sendingId: f.sending_id, fileId: f.id });
   await logEvent(env, "info", "file.status_changed", `${f.name}: ${f.status} → ${body.status}`, { from: f.status, to: body.status, message }, ctx);
   await finishIfDone(env, f.sending_id, ctx);
   if (body.status === "sent") {
@@ -198,6 +201,7 @@ admin.post("/files/:fileId/status", async (c) => {
     } catch (err) {
       await run(env, "UPDATE files SET status = 'failed', error = ?, finished_at = ? WHERE id = ? AND status = 'sent'",
         `Oversettelsen kunne ikke startes: ${err.message}`, nowIso(), f.id);
+      await releaseTranslation(env, reservation);
       await finishIfDone(env, f.sending_id, ctx);
       fail(503, "Oversettelsen kunne ikke startes akkurat nå. Prøv igjen om litt.");
     }
