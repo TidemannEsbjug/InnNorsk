@@ -19,7 +19,7 @@ enum APIError: Error {
         if let apiError = error as? APIError {
             switch apiError {
             case .invalidAddress:
-                return "Serveradressen ser ikke riktig ut. Skriv den som https://innnorsk.dittnavn.workers.dev."
+                return "Serveradressen ser ikke riktig ut. Skriv den som https://oversetter.dittnavn.workers.dev."
             case .unauthorized(let message):
                 return message ?? "Du er ikke logget inn."
             case .server(let status, let message):
@@ -69,10 +69,10 @@ enum APIError: Error {
 /// Klient for InnNorsk-Workeren. Samme innlogging som nettsiden: salt → PBKDF2 på telefonen → proof.
 /// Øktkapselen (innnorsk_sid) ligger i HTTPCookieStorage.shared og overlever omstart av appen.
 struct API {
-    /// Normalisert adresse uten skråstrek til slutt, f.eks. «https://innnorsk.dittnavn.workers.dev».
+    /// Normalisert adresse uten skråstrek til slutt, f.eks. «https://oversetter.dittnavn.workers.dev».
     let address: String
 
-    /// Godtar «innnorsk.dittnavn.workers.dev», en hel lenke eller en lenke til en underside; nettsiden ligger alltid på roten.
+    /// Godtar «oversetter.dittnavn.workers.dev», en hel lenke eller en lenke til en underside; nettsiden ligger alltid på roten.
     init?(address raw: String) {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let lower = text.lowercased()

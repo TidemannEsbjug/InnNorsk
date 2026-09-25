@@ -53,7 +53,7 @@ struct LoginView: View {
                 .listRowBackground(Color.clear)
 
                 Section {
-                    TextField("https://innnorsk.dittnavn.workers.dev", text: $model.serverAddress)
+                    TextField("https://oversetter.dittnavn.workers.dev", text: $model.serverAddress)
                         .keyboardType(.URL)
                         .textContentType(.URL)
                         .textInputAutocapitalization(.never)

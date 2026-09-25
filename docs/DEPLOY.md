@@ -34,7 +34,7 @@ npm install
 npx wrangler login                                  # åpner nettleseren
 npx wrangler d1 create innnorsk                     # lim database_id inn i wrangler.jsonc
 npx wrangler r2 bucket create innnorsk-files
-npm run deploy                                      # kjører D1-migrasjoner og deployer → skriver ut https://innnorsk.<konto>.workers.dev
+npm run deploy                                      # kjører D1-migrasjoner og deployer → skriver ut https://oversetter.<konto>.workers.dev
 npx wrangler secret put XAI_API_KEY                 # NY nøkkel fra console.x.ai (chat-/modelltilgang)
 openssl rand -base64 32 | npx wrangler secret put SALT_PEPPER
 npm run make-user -- <ditt-brukernavn> --role admin --display-name "<navnet Svetlana ser>" --apply
@@ -49,7 +49,7 @@ npm run make-user -- Svetlana --role user --display-name Svetlana --apply
    - Logg inn som deg selv → **Admin → Oversikt → Test API-tilkobling** (ett lite kall).
    - Logg inn som Svetlana (gjerne på telefonen) → legg til en liten .docx → **Oversett til norsk** → vent → **Last ned**.
 
-Valgfritt: eget domene under Workers → innnorsk → Settings → Domains & Routes.
+Valgfritt: eget domene under Workers → oversetter → Settings → Domains & Routes.
 
 ## iPhone-varsler (valgfritt)
 
@@ -61,7 +61,7 @@ Se [ios/README.md](../ios/README.md). Kort: lag en APNs-nøkkel (.p8) i Apple De
 - **Admin → Sendinger:** alle filer (original og oversettelse), status, feil med tekniske detaljer, Grok-kall, tokens, kostnad, estimat vs faktisk tid. «Sett i kø igjen» oversetter på nytt. «Last opp oversettelse» lar deg legge inn en fil manuelt. «Hilsen til Svetlana» vises for henne.
 - **Admin → Logg:** alle hendelser (innlogging, opplasting, oversettelse, nedlasting, feil i nettleseren).
 - **Admin → Økter / Brukere:** se og logg ut økter; nytt passord til Svetlana (vises én gang), eller kjør `make-user` på nytt.
-- **Cloudflare-dashbordet:** Workers → innnorsk → Logs, og Workflows → innnorsk-translate for hver oversettelse. `npx wrangler tail` gir live-logg.
+- **Cloudflare-dashbordet:** Workers → oversetter → Logs, og Workflows → oversetter-translate for hver oversettelse. `npx wrangler tail` gir live-logg.
 - **Oppdatering:** `git pull && npm install && npm run deploy`.
 
 ## Feilsøking

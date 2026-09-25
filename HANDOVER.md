@@ -7,7 +7,7 @@
 - Worker (`worker/`): innlogging, sendinger, Workflow-oversettelse med R2-cache per batch, estimat ved opplasting og live ETA, `grok_calls` med tokens/kostnad, admin, cron.
 - Web (`web/`): varmt design, «Oversett til norsk», «Mine filer», admin med xAI-kort og Grok-kall per fil.
 - Tak mot uventet forbruk (`worker/quota.js`): tegn til xAI per døgn / 30 dager og samlet lagring; se [docs/DEPLOY.md](docs/DEPLOY.md#tak-mot-uventet-regning).
-- **Deployet** 2026-09-25 til **https://innnorsk.viciapp.workers.dev**: D1 `innnorsk`, R2 `innnorsk-files`, migrasjon 0001–0003.
+- **Deployet** 2026-09-25 til **https://oversetter.tidemann.workers.dev** (Worker `oversetter`, Workflow `oversetter-translate`): D1 `innnorsk`, R2 `innnorsk-files`, migrasjon 0001–0003.
 - Dokumentasjon: [CLAUDE.md](CLAUDE.md), [README.md](README.md), [docs/DEPLOY.md](docs/DEPLOY.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Gjenstår

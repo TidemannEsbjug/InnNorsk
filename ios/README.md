@@ -95,7 +95,7 @@ Publiser etterpå med `npx wrangler deploy`. Legg aldri `.p8`-filen eller nøkle
 
 ## 7. Logg inn
 
-- **Serveradresse**: adressen til nettsiden, f.eks. `https://innnorsk.dittnavn.workers.dev` (eller ditt eget domene). `https://` legges til hvis du utelater det.
+- **Serveradresse**: adressen til nettsiden, f.eks. `https://oversetter.dittnavn.workers.dev` (eller ditt eget domene). `https://` legges til hvis du utelater det.
 - **Brukernavn** og **passord**: admin-brukeren din.
 
 Passordet forlater aldri telefonen: appen regner ut det samme passordbeviset som nettsiden (PBKDF2-SHA256) og sender bare det. Innloggingen huskes i 30 dager. Appen er bare for admin – Svetlana bruker nettsiden.
