@@ -13,7 +13,7 @@ En varm, enkel nettside på Cloudflare:
 3. Kan lukke siden; oversettelsen fortsetter i skyen.
 4. Laster ned under **Mine filer**. Filene ligger der til hun sletter dem.
 
-Eieren ser alt i admin: logger, økter, alle filer, feil, Grok-kall, tokens og kostnad, estimat vs faktisk tid. Valgfritt push-varsel på iPhone.
+Eieren ser alt i admin: logger, økter, alle filer (også de Svetlana har slettet, i 30 dager), feil, Grok-kall, tokens og kostnad, estimat vs faktisk tid, og hva hun har gjort og opplevd på siden (aktivitet per bruker, historikk per sending), så han kan hjelpe henne. Valgfritt push-varsel på iPhone.
 
 Windows-appen (Electron) finnes fortsatt for lokal bruk.
 

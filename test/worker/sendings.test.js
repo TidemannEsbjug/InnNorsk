@@ -93,7 +93,7 @@ test("ugyldige filer avvises med vennlige norske meldinger og logges", async () 
   assert.ok((await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = 'file.rejected' AND sending_id = ?", sending.id))[0].n >= 10);
 });
 
-test("stier renses, samme sti erstatter, maks antall filer, og utkastfiler kan fjernes", async () => {
+test("stier renses, samme sti erstatter, maks antall filer, og utkastfiler kan fjernes (eieren beholder de gamle)", async () => {
   const sending = await svetlana.newSending();
   const first = await svetlana.upload(sending.id, "..\\..\\C:\\Brev\\brev.txt", "Hello 1");
   assert.equal(first.data.file.path, "Brev/brev.txt");
@@ -101,14 +101,35 @@ test("stier renses, samme sti erstatter, maks antall filer, og utkastfiler kan f
   assert.equal(again.status, 201);
   const view = (await svetlana.get(`/api/sendings/${sending.id}`)).data.sending;
   assert.deepEqual(view.files.map((f) => f.path), ["brev/BREV.txt"], "samme sti (uansett store/små bokstaver) erstatter");
-  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/`), [`s/${sending.id}/${again.data.file.id}/original`]);
+  // Borte for henne, men den forrige versjonen ligger i R2 og kan lastes ned av eieren.
+  const originalOf = (res) => `s/${sending.id}/${res.data.file.id}/original`;
+  assert.deepEqual((await dev.r2Keys(`s/${sending.id}/`)).sort(), [originalOf(first), originalOf(again)].sort());
+  assert.equal((await svetlana.get(`/api/files/${first.data.file.id}/original`)).status, 404);
+  assert.equal((await admin.get(`/api/files/${first.data.file.id}/original`)).data.toString(), "Hello 1");
+  const [replaced] = await dev.sql("SELECT deleted_reason, purged_at FROM files WHERE id = ?", first.data.file.id);
+  assert.deepEqual([replaced.deleted_reason, replaced.purged_at], ["replaced", null]);
+  assert.ok((await dev.sql("SELECT 1 FROM events WHERE type = 'file.replaced' AND file_id = ?", first.data.file.id)).length);
+
   assert.equal((await svetlana.upload(sending.id, "b.md", "# B")).status, 201);
   assert.equal((await svetlana.upload(sending.id, "c.csv", "a,b")).status, 201);
   const tooMany = await svetlana.upload(sending.id, "d.html", "<p>d</p>");
-  assert.deepEqual([tooMany.status, tooMany.data.error], [400, "Du kan sende maks 3 filer om gangen."]);
+  assert.deepEqual([tooMany.status, tooMany.data.error], [400, "Du kan sende maks 3 filer om gangen."], "erstattede filer teller ikke");
   assert.equal((await svetlana.del(`/api/sendings/${sending.id}/files/${again.data.file.id}`)).status, 204);
-  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/${again.data.file.id}/`), []);
+  assert.equal((await svetlana.del(`/api/sendings/${sending.id}/files/${again.data.file.id}`)).status, 404, "allerede fjernet");
+  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/${again.data.file.id}/`), [originalOf(again)], "eieren kan fortsatt laste den ned");
   assert.equal((await svetlana.upload(sending.id, "d.html", "<p>d</p>")).status, 201);
+  const [removed] = await dev.sql("SELECT data_json, message FROM events WHERE type = 'file.removed' AND file_id = ?", again.data.file.id);
+  assert.deepEqual([removed.message, JSON.parse(removed.data_json).reason], ["BREV.txt fjernet før sending", "removed"]);
+
+  // Hun ser tre filer; admin (med all=1) ser også den erstattede og den fjernede, merket, men de telles ikke med.
+  assert.deepEqual((await svetlana.get(`/api/sendings/${sending.id}`)).data.sending.files.map((f) => f.name), ["b.md", "c.csv", "d.html"]);
+  const theirs = (await admin.get("/api/admin/sendings?all=1&limit=500")).data.sendings.find((s) => s.id === sending.id);
+  assert.deepEqual(theirs.files.map((f) => [f.path, f.deletedReason]), [
+    ["Brev/brev.txt", "replaced"], ["b.md", null], ["brev/BREV.txt", "removed"], ["c.csv", null], ["d.html", null],
+  ]);
+  assert.equal(theirs.counts.total, 3);
+  assert.ok(!(await admin.get("/api/admin/sendings?limit=200")).data.sendings.find((s) => s.id === sending.id).files.some((f) => f.deletedAt),
+    "uten all=1 (iPhone-appen) er listen som før");
 });
 
 test("utkastet viser analyse og estimat: «Klar – …» per fil og samlet tid for filene som kan oversettes", async () => {
@@ -256,19 +277,219 @@ test("tilgang: andre brukere ser ikke Svetlanas sendinger eller filer (404)", as
   assert.equal((await admin.upload(sending.id, "x.txt", "Hello")).status, 404);
 });
 
-test("sletting fjerner filene fra R2 og sendingen fra listen, også mens oversettelsen pågår", async () => {
+// Slettet mens den ble oversatt (brukes igjen under: ligger fortsatt i R2 når cron rydder, og slettes for godt av eieren).
+let stopped;
+// Ferdig oversatt og lastet ned av henne før hun slettet den (slettes for godt av cron under).
+let finished;
+
+const theirs = async (id) => (await admin.get("/api/admin/sendings?all=1&limit=500")).data.sendings.find((s) => s.id === id);
+const DAY_MS = 86400000;
+const daysAgo = (n) => new Date(Date.now() - n * DAY_MS).toISOString();
+
+test("sletting: borte for henne (404) med én gang, oversettelsen stopper og mellomlageret ryddes, men eieren beholder filene", async () => {
   const sending = await svetlana.send({ "slett-meg.txt": "Hello", "og-meg.md": "# Hi" });
-  assert.equal((await dev.r2Keys(`s/${sending.id}/`)).length, 2);
+  stopped = sending;
+  const originals = sending.files.map((f) => `s/${sending.id}/${f.id}/original`).sort();
+  assert.deepEqual((await dev.r2Keys(`s/${sending.id}/`)).sort(), originals);
   await eventually(async () => (await dev.r2Keys(`work/${sending.files[0].id}/`)).length > 0, { what: "Workflowen har begynt" });
   assert.equal((await svetlana.del(`/api/sendings/${sending.id}`)).status, 204);
-  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/`), []);
+
+  // For henne er den borte, akkurat som før.
   assert.ok(!(await svetlana.get("/api/sendings")).data.sendings.some((s) => s.id === sending.id));
   assert.equal((await svetlana.get(`/api/sendings/${sending.id}`)).status, 404);
   assert.equal((await svetlana.get(`/api/files/${sending.files[0].id}/original`)).status, 404);
-  const [row] = await dev.sql("SELECT status, deleted_at FROM sendings WHERE id = ?", sending.id);
-  assert.equal(row.status, "deleted");
-  assert.ok(row.deleted_at);
-  assert.equal((await dev.sql("SELECT COUNT(*) AS n FROM events WHERE type = 'sending.deleted' AND sending_id = ?", sending.id))[0].n, 1);
-  assert.deepEqual(await dev.r2Keys(`work/${sending.files[0].id}/`), [], "mellomlageret er borte");
+  assert.equal((await svetlana.del(`/api/sendings/${sending.id}`)).status, 404);
   assert.equal((await new Client(dev.url).get(`/api/sendings/${sending.id}`)).status, 401);
+  assert.deepEqual(await dev.r2Keys(`work/${sending.files[0].id}/`), [], "mellomlageret er borte");
+  assert.deepEqual((await dev.r2Keys(`s/${sending.id}/`)).sort(), originals, "originalene ligger der fortsatt");
+
+  const [row] = await dev.sql("SELECT s.status, s.deleted_at, s.deleted_reason, u.username FROM sendings s JOIN users u ON u.id = s.deleted_by WHERE s.id = ?", sending.id);
+  assert.deepEqual([row.status, Boolean(row.deleted_at), row.deleted_reason, row.username], ["deleted", true, "user", "svetlana"]);
+  const [event] = await dev.sql("SELECT message, data_json FROM events WHERE type = 'sending.deleted' AND sending_id = ?", sending.id);
+  assert.equal(event.message, "Svetlana slettet sendingen");
+  assert.deepEqual(JSON.parse(event.data_json).names, ["og-meg.md", "slett-meg.txt"]);
+
+  // Eieren: ikke i standardlisten (iPhone-appen), men med all=1, merket med hvem og når, og filene kan lastes ned i 30 dager.
+  assert.ok(!(await admin.get("/api/admin/sendings?limit=200")).data.sendings.some((s) => s.id === sending.id));
+  const s = await theirs(sending.id);
+  assert.deepEqual([s.status, s.deletedBy, s.deletedReason, s.deletedAt], ["deleted", "Svetlana", "user", row.deleted_at]);
+  assert.equal(s.counts.total, 2);
+  for (const f of s.files) {
+    assert.deepEqual([f.deletedAt, f.deletedReason, f.purgedAt], [row.deleted_at, "sending", null]);
+    assert.equal(Date.parse(f.purgeAt) - Date.parse(f.deletedAt), 30 * DAY_MS, "RETAIN_DELETED_DAYS = 30");
+  }
+  const dl = await admin.get(`/api/files/${sending.files[1].id}/original`);
+  assert.deepEqual([dl.status, dl.data.toString()], [200, "Hello"]);
+  assert.equal((await admin.get(`/api/admin/files/${sending.files[1].id}/calls`)).status, 200);
+
+  // …men ingenting kan startes eller endres igjen.
+  const refused = await admin.post(`/api/admin/files/${sending.files[1].id}/status`, { status: "sent" });
+  assert.deepEqual([refused.status, refused.data.error], [410, "Sendingen er slettet. Filene kan lastes ned, men ikke endres eller oversettes på nytt."]);
+  assert.equal((await admin.put(`/api/admin/files/${sending.files[1].id}/result?name=x.txt`, "x")).status, 410);
+  assert.equal((await admin.post(`/api/admin/sendings/${sending.id}/reply`, { reply: "Hei" })).status, 404);
+  assert.deepEqual((await dev.r2Keys(`s/${sending.id}/`)).sort(), originals, "ingen oversettelse lastet opp");
+});
+
+test("sletting av en ferdig sending: eieren laster ned originalen og oversettelsen, hun får 404; historikken viser alt i rekkefølge", async () => {
+  dev.xai.setMode("upper");
+  const sending = await svetlana.send({ "ferdig.txt": "Good morning" }, { note: "Til legen" });
+  finished = sending;
+  const [file] = sending.files;
+  await eventually(async () => (await svetlana.get(`/api/sendings/${sending.id}`)).data.sending.status === "done",
+    { timeoutMs: 30000, what: "sendingen blir ferdig" });
+  dev.xai.setMode("slow", 5000);
+  assert.equal((await svetlana.get(`/api/files/${file.id}/result`)).data.toString(), "NB:GOOD MORNING");
+  assert.equal((await svetlana.del(`/api/sendings/${sending.id}`)).status, 204);
+
+  assert.equal((await svetlana.get(`/api/files/${file.id}/result`)).status, 404);
+  assert.equal((await svetlana.get(`/api/files/${file.id}/original`)).status, 404);
+  const result = await admin.get(`/api/files/${file.id}/result`);
+  assert.deepEqual([result.status, result.data.toString()], [200, "NB:GOOD MORNING"]);
+  assert.match(result.headers.get("content-disposition"), /ferdig%20%28norsk%29\.txt$/);
+  assert.equal((await admin.get(`/api/files/${file.id}/original`)).data.toString(), "Good morning");
+  const f = (await theirs(sending.id)).files[0];
+  assert.deepEqual([f.status, f.outputName, f.deletedReason], ["done", "ferdig (norsk).txt", "sending"]);
+
+  // Historikken for sendingen (Admin → Sendinger → Historikk), eldste først, med hvem som gjorde hva.
+  const { events } = (await admin.get(`/api/admin/events?sendingId=${sending.id}&limit=200`)).data;
+  const timeline = events.reverse().map((e) => [e.type, e.username]);
+  const expected = [
+    ["sending.created", "svetlana"], ["file.uploaded", "svetlana"], ["sending.sent", "svetlana"], ["file.started", null], ["file.done", null],
+    ["sending.done", null], ["download.result", "svetlana"], ["sending.deleted", "svetlana"], ["download.result", "eier"], ["download.original", "eier"],
+  ];
+  assert.deepEqual(timeline.filter(([type]) => !type.startsWith("push.")), expected);
+  assert.equal(events.find((e) => e.type === "sending.sent").data.note, "Til legen", "meldingen hennes står i loggen");
+});
+
+test("cron sletter filene for godt etter RETAIN_DELETED_DAYS: R2 tømmes, historikken blir stående, nedlasting gir 410", async () => {
+  // Slettet, men ikke slettet for godt: med i lagringstaket (MAX_STORAGE_GB) og vist for seg i Oversikt.
+  const storage = async () => (await admin.get("/api/admin/overview")).data.storage;
+  const stored = async (id) => (await dev.sql("SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE sending_id = ? AND purged_at IS NULL", id))[0].n;
+  const bytes = await stored(finished.id);
+  const before = await storage();
+  assert.ok(before.deletedBytes >= bytes && before.deletedFiles >= 4 && before.bytes >= before.deletedBytes, JSON.stringify(before));
+  assert.equal(before.retainDays, 30);
+
+  await dev.sql("UPDATE files SET deleted_at = ? WHERE sending_id = ?", daysAgo(31), finished.id);
+  await dev.cron();
+  assert.deepEqual(await dev.r2Keys(`s/${finished.id}/`), []);
+  const after = await storage();
+  assert.deepEqual([after.deletedBytes, after.deletedFiles, await stored(finished.id)], [before.deletedBytes - bytes, before.deletedFiles - 2, 0],
+    "lagringstaket teller det ikke lenger");
+  const [file] = finished.files;
+  const gone = await admin.get(`/api/files/${file.id}/result`);
+  assert.deepEqual([gone.status, gone.data.error], [410, "Filen er slettet for godt."]);
+  assert.equal((await admin.get(`/api/files/${file.id}/original`)).status, 410);
+  assert.equal((await svetlana.get(`/api/files/${file.id}/original`)).status, 404, "for henne er den fortsatt bare borte");
+
+  const s = await theirs(finished.id);
+  assert.ok(s.files[0].purgedAt && s.files[0].purgeAt === null, "historikken står igjen, merket som slettet for godt");
+  const [event] = await dev.sql("SELECT message, data_json, source FROM events WHERE type = 'sending.purged' AND sending_id = ?", finished.id);
+  assert.equal(event.message, "1 fil slettet for godt etter 30 dager");
+  assert.deepEqual([JSON.parse(event.data_json).reason, JSON.parse(event.data_json).files, event.source], ["retention", ["ferdig.txt"], "system"]);
+  const [sweep] = await dev.sql("SELECT data_json FROM events WHERE type = 'retention.sweep' ORDER BY id DESC LIMIT 1");
+  assert.equal(JSON.parse(sweep.data_json).purgedFiles, 1);
+
+  // Det som ble slettet nylig, ligger der fortsatt.
+  assert.equal((await dev.r2Keys(`s/${stopped.id}/`)).length, 2);
+});
+
+test("«Slett for godt nå» i admin: bare det som er slettet, med én gang", async () => {
+  const live = await svetlana.newSending();
+  await svetlana.upload(live.id, "lever.txt", "Hello");
+  assert.equal((await admin.post(`/api/admin/sendings/${live.id}/purge`)).status, 409, "ingenting er slettet her");
+  assert.equal((await svetlana.post(`/api/admin/sendings/${stopped.id}/purge`)).status, 403);
+  assert.equal((await admin.post("/api/admin/sendings/finnesikke/purge")).status, 404);
+
+  const res = await admin.post(`/api/admin/sendings/${stopped.id}/purge`);
+  assert.equal(res.status, 200, JSON.stringify(res.data));
+  assert.ok(res.data.sending.files.every((f) => f.purgedAt));
+  assert.deepEqual(await dev.r2Keys(`s/${stopped.id}/`), []);
+  assert.equal((await admin.post(`/api/admin/sendings/${stopped.id}/purge`)).status, 409, "allerede slettet for godt");
+  const [event] = await dev.sql("SELECT message, user_id FROM events WHERE type = 'sending.purged' AND sending_id = ?", stopped.id);
+  assert.equal(event.message, "2 filer slettet for godt av Jonas");
+  assert.equal((await dev.r2Keys(`s/${live.id}/`)).length, 1, "andre sendinger er urørt");
+});
+
+test("cron: utkast som aldri ble sendt – tomme fjernes etter to dager, de med filer slettes som om hun slettet dem", async () => {
+  const withFile = await svetlana.newSending();
+  const file = (await svetlana.upload(withFile.id, "glemt.txt", "Hello")).data.file;
+  const empty = await svetlana.newSending();
+  await dev.sql("UPDATE sendings SET created_at = ? WHERE id IN (?, ?)", daysAgo(3), withFile.id, empty.id);
+  assert.ok(!(await svetlana.get("/api/sendings")).data.sendings.some((s) => s.id === withFile.id), "hun ser ikke gamle utkast");
+  assert.equal((await theirs(withFile.id)).status, "draft", "men eieren gjør det");
+
+  await dev.cron();
+  assert.deepEqual(await dev.sql("SELECT id FROM sendings WHERE id = ?", empty.id), [], "tomt utkast fjernes helt");
+  const s = await theirs(withFile.id);
+  assert.deepEqual([s.status, s.deletedReason, s.deletedBy], ["deleted", "expired", null]);
+  assert.deepEqual(await dev.r2Keys(`s/${withFile.id}/`), [`s/${withFile.id}/${file.id}/original`]);
+  assert.equal((await admin.get(`/api/files/${file.id}/original`)).data.toString(), "Hello");
+  assert.equal((await svetlana.get(`/api/files/${file.id}/original`)).status, 404);
+  const [event] = await dev.sql("SELECT message, source FROM events WHERE type = 'sending.deleted' AND sending_id = ?", withFile.id);
+  assert.deepEqual([event.message, event.source], ["Utkastet ble aldri sendt og er ryddet bort (1 fil)", "system"]);
+});
+
+test("nettsiden rydder selv (?reason=): eieren ser forskjell på et klikk og automatisk opprydding", async () => {
+  const draft = await svetlana.newSending();
+  const file = (await svetlana.upload(draft.id, "rest.txt", "Hello")).data.file;
+  assert.equal((await svetlana.del(`/api/sendings/${draft.id}/files/${file.id}?reason=cleanup`)).status, 204);
+  assert.equal((await svetlana.del(`/api/sendings/${draft.id}?reason=language`)).status, 204);
+  const s = await theirs(draft.id);
+  assert.deepEqual([s.deletedReason, s.files[0].deletedReason], ["language", "cleanup"]);
+  const events = await dev.sql("SELECT type, message FROM events WHERE sending_id = ? AND type IN ('file.removed', 'sending.deleted') ORDER BY id", draft.id);
+  assert.deepEqual(events.map((e) => e.message), [
+    "rest.txt fjernet av nettsiden før sending (var ikke lenger i listen)",
+    "Utkastet ble forkastet fordi språket ble byttet (filene lastes opp på nytt)",
+  ]);
+  // Språk og melding på et utkast logges.
+  const other = await svetlana.newSending("bokmal");
+  await svetlana.post(`/api/sendings/${other.id}/note`, { targetLanguage: "nynorsk", note: "Haster" });
+  const [updated] = await dev.sql("SELECT message, data_json FROM events WHERE type = 'sending.updated' AND sending_id = ?", other.id);
+  assert.equal(updated.message, "Språket er byttet til nynorsk. Meldingen er endret");
+  assert.deepEqual(JSON.parse(updated.data_json), { targetLanguage: "nynorsk", previousLanguage: "bokmal", note: "Haster" });
+});
+
+test("aktivitet fra nettleseren: sidevisning, filer som ikke ble tatt med, opplastingsfeil og feilmeldinger havner i loggen", async () => {
+  const browser = await dev.login("svetlana"); // egen økt, så kvoten per økt starter på null
+  const session = crypto.createHash("sha256").update(browser.cookie.split("=")[1]).digest("hex").slice(0, 8);
+  const draft = await browser.newSending();
+  const post = (body, opts) => browser.post("/api/client-log", body, opts);
+  const ua = { headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130.0 Safari/537.36" } };
+  assert.equal((await post({ type: "client.page", message: "Åpnet / · Chrome på Windows · 1280×800",
+    data: { page: "/", viewport: "1280×800", browser: "Chrome på Windows" } }, ua)).status, 204);
+  assert.equal((await post({ type: "client.file_rejected", level: "warn", sendingId: draft.id, message: "2 filer ble ikke tatt med: bilde.jpg, gammel.doc",
+    data: { headline: "2 filer ble ikke tatt med:", total: 2, reasons: { type: "Filtyper som ikke kan oversettes, for eksempel bilder." },
+      files: [{ name: "bilde.jpg", size: 1234, reason: "type" }, { name: "gammel.doc", size: 99, reason: "type" }] } })).status, 204);
+  assert.equal((await post({ type: "client.upload_failed", sendingId: draft.id, message: "Opplastingen av brev.docx feilet: Opplastingen ble brutt.",
+    data: { name: "brev.docx", size: 5000, status: 0, message: "Opplastingen ble brutt." } })).status, 204);
+  assert.equal((await post({ type: "client.error_shown", message: "Feilmelding vist ved sending: «Oversettelsen er ikke satt opp ennå.»",
+    data: { where: "send", status: 503, password: "skal-aldri-lagres" } })).status, 204);
+  const foreign = await admin.newSending();
+  assert.equal((await post({ type: "client.error_shown", message: "fremmed", sendingId: foreign.id })).status, 204);
+  assert.equal((await post({ type: "client.error_shown", message: "stor", data: { text: "x".repeat(10000) } })).status, 204);
+  assert.equal((await post({ type: "client.noe_annet", message: "x" })).status, 400);
+
+  const rows = await dev.sql("SELECT type, level, message, sending_id, user_id, source, data_json FROM events WHERE session_id = ? AND type LIKE 'client.%' ORDER BY id", session);
+  const [page, rejected, failed, shown, other, big] = rows;
+  assert.deepEqual(rows.map((r) => [r.type, r.level]), [
+    ["client.page", "info"], ["client.file_rejected", "warn"], ["client.upload_failed", "warn"], ["client.error_shown", "warn"],
+    ["client.error_shown", "warn"], ["client.error_shown", "warn"],
+  ]);
+  assert.ok(rows.every((r) => r.source === "web" && r.user_id === page.user_id && r.user_id));
+  assert.equal(page.message, "Åpnet / · Chrome på Windows · 1280×800");
+  assert.match(JSON.parse(page.data_json).userAgent, /Windows NT 10\.0/);
+  assert.deepEqual([rejected.sending_id, JSON.parse(rejected.data_json).files.map((f) => f.name)], [draft.id, ["bilde.jpg", "gammel.doc"]]);
+  assert.equal(failed.sending_id, draft.id);
+  assert.equal(JSON.parse(shown.data_json).password, "[skjult]", "hemmeligheter vaskes bort");
+  assert.equal(other.sending_id, null, "andres sendinger kobles ikke til");
+  assert.equal(JSON.parse(big.data_json).truncated, true);
+  assert.ok(big.data_json.length < 4500);
+
+  // Egen kvote (60 i minuttet per økt) som ikke tar av kvoten for JavaScript-feil.
+  for (let i = rows.length; i < 60; i++) assert.equal((await post({ type: "client.page", message: `side ${i}` })).status, 204);
+  const limited = await post({ type: "client.page", message: "en for mye" });
+  assert.deepEqual([limited.status, limited.data.error], [429, "For mange hendelser. Prøv igjen om litt."]);
+  assert.equal((await post({ message: "TypeError: x" })).status, 204, "client.error har sin egen kvote");
+  assert.equal((await new Client(dev.url).post("/api/client-log", { type: "client.page" })).status, 401);
 });

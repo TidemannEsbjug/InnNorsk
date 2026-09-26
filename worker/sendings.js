@@ -1,10 +1,12 @@
 // Sendinger og filer: tilgang, visning (JSON for nettsiden, iPhone og admin), statusen som følger filene,
-// ferdige og mislykkede filer, og start/stopp av oversettelsen (Workflow-instansene).
-import { one, run, batch, nowIso, isoAgo, DAY_MS } from "./db.js";
+// ferdige og mislykkede filer, start/stopp av oversettelsen (Workflow-instansene) og sletting for godt.
+// Det Svetlana sletter, er borte for henne med én gang (deleted_at), men ligger i R2 for eieren til purged_at er satt.
+import { config } from "./config.js";
+import { one, all, run, batch, nowIso, isoAgo, DAY_MS } from "./db.js";
 import { fail } from "./http.js";
 import { logEvent } from "./log.js";
 import { pushToAdmins } from "./apns.js";
-import { r2Key } from "./files.js";
+import { r2Key, deleteObjects } from "./files.js";
 import { costSql } from "./xai.js";
 
 // Eierens navn, slik Svetlana ser det («Kunne ikke oversettes. Jonas har fått beskjed.»).
@@ -56,7 +58,12 @@ export function statusText(f, translator = DEFAULT_TRANSLATOR) {
 
 const secondsBetween = (from, to) => Math.round((Date.parse(to) - Date.parse(from)) / 1000);
 
-export function serializeFile(f, translator, admin = false) {
+// Når en slettet fil slettes for godt (cron kjører hvert 15. minutt, så det kan gå litt lenger).
+const purgeAt = (deletedAt, retainDays) =>
+  deletedAt && retainDays ? new Date(Date.parse(deletedAt) + retainDays * DAY_MS).toISOString() : null;
+
+// retainDays (RETAIN_DELETED_DAYS) trengs bare for admin-visningen av slettede filer.
+export function serializeFile(f, translator, admin = false, retainDays = null) {
   const view = {
     id: f.id,
     sendingId: f.sending_id,
@@ -95,8 +102,15 @@ export function serializeFile(f, translator, admin = false) {
     costUsd: f.cost_usd,
     durationSeconds: f.started_at ? secondsBetween(f.started_at, f.finished_at || nowIso()) : null,
     outputSource: f.output_source,
+    deletedAt: f.deleted_at ?? null,
+    deletedReason: f.deleted_reason ?? null,
+    purgedAt: f.purged_at ?? null,
+    purgeAt: f.purged_at ? null : purgeAt(f.deleted_at, retainDays),
   };
 }
+
+// Filene som hørte til sendingen (også når hele sendingen er slettet), ikke de hun fjernet fra utkastet eller erstattet.
+const inSending = (f) => !f.deleted_at || f.deleted_reason === "sending";
 
 // Beregnet tid igjen for sendingen: filer som venter (klare utkast eller i kø) + resten av filen under arbeid.
 function secondsLeft(files) {
@@ -108,9 +122,11 @@ function secondsLeft(files) {
   return total == null ? null : Math.round(total);
 }
 
-function serializeSending(s, files, translator, admin = false) {
-  const count = (...statuses) => files.filter((f) => statuses.includes(f.status)).length;
-  return {
+// files kan (for admin) også ha filer hun har fjernet eller erstattet; de telles ikke med.
+function serializeSending(s, files, { translator, admin = false, retainDays = null }) {
+  const kept = files.filter(inSending);
+  const count = (...statuses) => kept.filter((f) => statuses.includes(f.status)).length;
+  const view = {
     id: s.id,
     userId: s.user_id,
     ...(s.username !== undefined ? { username: s.username, displayName: s.display_name || s.username } : {}),
@@ -122,37 +138,48 @@ function serializeSending(s, files, translator, admin = false) {
     sentAt: s.sent_at,
     startedAt: s.started_at,
     finishedAt: s.finished_at,
-    estimateSeconds: secondsLeft(files),
-    files: files.map((f) => serializeFile(f, translator, admin)),
-    counts: { total: files.length, waiting: count("draft", "sent"), working: count("working"), done: count("done"), failed: count("failed") },
+    estimateSeconds: secondsLeft(kept),
+    files: files.map((f) => serializeFile(f, translator, admin, retainDays)),
+    counts: { total: kept.length, waiting: count("draft", "sent"), working: count("working"), done: count("done"), failed: count("failed") },
   };
+  if (!admin) return view;
+  return { ...view, deletedAt: s.deleted_at ?? null, deletedBy: s.deleted_by_name ?? null, deletedReason: s.deleted_reason ?? null };
 }
 
 const translatorOf = (result) => (result.results[0] ? result.results[0].name : DEFAULT_TRANSLATOR);
 
+const SENDING_SELECT = `SELECT s.*, u.username, u.display_name, COALESCE(d.display_name, d.username) AS deleted_by_name
+  FROM sendings s LEFT JOIN users u ON u.id = s.user_id LEFT JOIN users d ON d.id = s.deleted_by`;
+
 // Sendinger med filer i én rundtur. userId = null gir alle brukeres (admin).
-export async function listSendings(env, { userId = null, limit = 50, admin = false } = {}) {
-  const where = `s.deleted_at IS NULL AND NOT (s.status = 'draft' AND s.created_at < ?)${userId == null ? "" : " AND s.user_id = ?"}`;
-  const args = [isoAgo(DAY_MS), ...(userId == null ? [] : [userId]), limit];
+// withDeleted (bare admin): også slettede sendinger (som har hatt filer), utkast eldre enn et døgn og filer hun har
+// fjernet eller erstattet. Uten er utvalget det samme som hun ser (og det iPhone-appen får).
+export async function listSendings(env, { userId = null, limit = 50, admin = false, withDeleted = false } = {}) {
+  const visible = withDeleted
+    ? "(s.deleted_at IS NULL OR EXISTS (SELECT 1 FROM files x WHERE x.sending_id = s.id))"
+    : "s.deleted_at IS NULL AND NOT (s.status = 'draft' AND s.created_at < ?)";
+  const where = `${visible}${userId == null ? "" : " AND s.user_id = ?"}`;
+  const args = [...(withDeleted ? [] : [isoAgo(DAY_MS)]), ...(userId == null ? [] : [userId]), limit];
   const [sendings, files, translator] = await batch(env, [
-    [`SELECT s.*, u.username, u.display_name FROM sendings s LEFT JOIN users u ON u.id = s.user_id
-      WHERE ${where} ORDER BY s.created_at DESC LIMIT ?`, ...args],
-    [`SELECT * FROM files WHERE deleted_at IS NULL AND sending_id IN
-      (SELECT s.id FROM sendings s WHERE ${where} ORDER BY s.created_at DESC LIMIT ?) ORDER BY rel_path`, ...args],
+    [`${SENDING_SELECT} WHERE ${where} ORDER BY s.created_at DESC LIMIT ?`, ...args],
+    [`SELECT * FROM files WHERE ${withDeleted ? "" : "deleted_at IS NULL AND "}sending_id IN
+      (SELECT s.id FROM sendings s WHERE ${where} ORDER BY s.created_at DESC LIMIT ?) ORDER BY rel_path, created_at`, ...args],
     [TRANSLATOR_SQL],
   ]);
   const bySending = Map.groupBy(files.results, (f) => f.sending_id);
-  const name = translatorOf(translator);
-  return { sendings: sendings.results.map((s) => serializeSending(s, bySending.get(s.id) || [], name, admin)) };
+  const opts = { translator: translatorOf(translator), admin, retainDays: config(env).retainDeletedDays };
+  return { sendings: sendings.results.map((s) => serializeSending(s, bySending.get(s.id) || [], opts)) };
 }
 
-export async function sendingView(env, id, admin = false) {
+// withDeleted: også filer hun har fjernet eller erstattet (bare for admin).
+export async function sendingView(env, id, admin = false, { withDeleted = false } = {}) {
   const [sendings, files, translator] = await batch(env, [
-    ["SELECT s.*, u.username, u.display_name FROM sendings s LEFT JOIN users u ON u.id = s.user_id WHERE s.id = ?", id],
-    ["SELECT * FROM files WHERE sending_id = ? AND deleted_at IS NULL ORDER BY rel_path", id],
+    [`${SENDING_SELECT} WHERE s.id = ?`, id],
+    [`SELECT * FROM files WHERE sending_id = ?${withDeleted ? "" : " AND deleted_at IS NULL"} ORDER BY rel_path, created_at`, id],
     [TRANSLATOR_SQL],
   ]);
-  return serializeSending(sendings.results[0], files.results, translatorOf(translator), admin);
+  const opts = { translator: translatorOf(translator), admin, retainDays: config(env).retainDeletedDays };
+  return serializeSending(sendings.results[0], files.results, opts);
 }
 
 // Egen sending, eller (bare lesing) hvilken som helst for admin. Andres sendinger finnes ikke (404).
@@ -163,16 +190,19 @@ export async function loadSending(c, id, { write = false } = {}) {
   return s;
 }
 
-// Fil med sendingens eier og status; admin ser alle, brukeren bare sine egne.
-export async function loadFile(c, fileId) {
+// Fil med sendingens eier og status; admin ser alle, brukeren bare sine egne. withDeleted: admin får også en fil som er
+// slettet (deleted_at / sending_deleted_at / purged_at sier hvordan); for alle andre er en slettet fil borte (404).
+export async function loadFile(c, fileId, { withDeleted = false } = {}) {
   const user = c.get("user");
+  const admin = user.role === "admin";
   const f = await one(
     c.env,
-    `SELECT f.*, s.user_id, s.status AS sending_status, s.workflow_id AS sending_workflow_id FROM files f
-     JOIN sendings s ON s.id = f.sending_id WHERE f.id = ? AND f.deleted_at IS NULL AND s.deleted_at IS NULL`,
+    `SELECT f.*, s.user_id, s.status AS sending_status, s.workflow_id AS sending_workflow_id, s.deleted_at AS sending_deleted_at
+     FROM files f JOIN sendings s ON s.id = f.sending_id WHERE f.id = ?`,
     fileId
   );
-  if (!f || (f.user_id !== user.id && user.role !== "admin")) fail(404, "Fant ikke filen.");
+  const deleted = f && (f.deleted_at || f.sending_deleted_at);
+  if (!f || (f.user_id !== user.id && !admin) || (deleted && !(admin && withDeleted))) fail(404, "Fant ikke filen.");
   return f;
 }
 
@@ -209,7 +239,8 @@ export async function finishIfDone(env, sendingId, ctx) {
 }
 
 // Filen er oversatt (resultatet ligger allerede i R2). owner = Workflow-instansen som må eie filen (null for admin).
-// Returnerer raden, eller null når filen er borte eller tatt over; da fjernes resultatet hvis filen er slettet.
+// Returnerer raden, eller null når filen er borte eller tatt over. Ble filen slettet underveis, fjernes et resultat som
+// aldri ble registrert; fantes det en oversettelse fra før, er den nettopp overskrevet og beholdes for eieren.
 export async function markDone(env, f, { name, bytes, source, owner = null, ctx }) {
   const [cost, costArgs] = costSql(env);
   const row = await one(
@@ -220,9 +251,16 @@ export async function markDone(env, f, { name, bytes, source, owner = null, ctx 
     name, bytes, source, ...costArgs, nowIso(), f.id, owner, owner
   );
   if (!row) {
-    if (!(await one(env, "SELECT 1 AS ok FROM files WHERE id = ? AND deleted_at IS NULL", f.id))) {
-      await env.FILES.delete(r2Key(f.sending_id, f.id, "result"));
-    }
+    // Slettet av henne mens oversettelsen ble ferdig: eieren beholder resultatet til filen ryddes bort.
+    const kept = await run(
+      env,
+      `UPDATE files SET output_name = ?, output_bytes = ?, output_source = ?, finished_at = COALESCE(finished_at, ?)
+       WHERE id = ? AND deleted_at IS NOT NULL AND purged_at IS NULL`,
+      name, bytes, source, nowIso(), f.id
+    );
+    if (kept.meta.changes) return null;
+    const current = await one(env, "SELECT deleted_at, purged_at FROM files WHERE id = ?", f.id);
+    if (!current || current.purged_at) await env.FILES.delete(r2Key(f.sending_id, f.id, "result"));
     return null;
   }
   await logEvent(env, "info", "file.done", `${row.name} er oversatt`, {
@@ -278,4 +316,33 @@ export async function stopWorkflows(env, s) {
       // allerede ferdig eller finnes ikke
     }
   }
+}
+
+// Filene i R2 som eieren fortsatt kan laste ned etter at Svetlana har slettet dem (eller cron har ryddet et gammelt utkast).
+// sendingId: bare én sending; cutoff: bare filer slettet før dette tidspunktet (RETAIN_DELETED_DAYS).
+export function retainedFiles(env, { sendingId = null, cutoff = null, limit = 500 } = {}) {
+  return all(
+    env,
+    `SELECT id, sending_id, name, bytes, output_bytes FROM files WHERE deleted_at IS NOT NULL AND purged_at IS NULL
+       ${sendingId ? "AND sending_id = ?" : ""} ${cutoff ? "AND deleted_at < ?" : ""} ORDER BY deleted_at LIMIT ?`,
+    ...[sendingId, cutoff].filter(Boolean), limit
+  );
+}
+
+// Sletter originalen og oversettelsen i R2 for godt og setter purged_at; radene blir stående som historikk i admin.
+// files: rader fra retainedFiles. Én hendelse sending.purged per sending; why fullfører meldingen («etter 30 dager»).
+export async function purgeFiles(env, files, { reason, why, ctx }) {
+  if (!files.length) return 0;
+  await deleteObjects(env, files);
+  await run(env, "UPDATE files SET purged_at = ? WHERE purged_at IS NULL AND id IN (SELECT value FROM json_each(?))",
+    nowIso(), JSON.stringify(files.map((f) => f.id)));
+  for (const [sendingId, list] of Map.groupBy(files, (f) => f.sending_id)) {
+    await logEvent(env, "info", "sending.purged", `${filesText(list.length)} slettet for godt ${why}`, {
+      reason,
+      count: list.length,
+      bytes: list.reduce((n, f) => n + (f.bytes || 0) + (f.output_bytes || 0), 0),
+      files: list.slice(0, 50).map((f) => f.name),
+    }, { ...ctx, sendingId });
+  }
+  return files.length;
 }

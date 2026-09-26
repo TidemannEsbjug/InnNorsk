@@ -1,6 +1,7 @@
 import {
   api, upload, h, fill, icon, extBadge, dirName, baseName, plural, formatBytes, formatClock, formatDuration, formatNumber,
   formatSeconds, formatWhen, relativeTime, LANGUAGE_LABELS, confirmDialog, toast, logout, reportErrors, initMenu, newSaltedProof,
+  describeAgent,
 } from "./api.js";
 
 reportErrors();
@@ -9,6 +10,9 @@ initMenu();
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
 const LOG_PAGE = 100;
+const SENDINGS_PAGE = 50;
+const TIMELINE_MAX = 200;
+const ONLINE_MS = 2 * 60000; // økten flyttes fram hvert minutt mens siden er åpen
 
 const STATUS = { draft: "Utkast", sent: "I kø", working: "Oversettes", done: "Ferdig", failed: "Feilet" };
 const SENDING_STATUS = { draft: "Utkast", sent: "Startet", done: "Ferdig", deleted: "Slettet" };
@@ -16,14 +20,36 @@ const LEVELS = { debug: "Debug", info: "Info", warn: "Advarsel", error: "Feil" }
 // «agent» finnes bare i gamle hendelser fra Mac-tiden.
 const SOURCES = { web: "Nettside", ios: "iPhone", system: "System", workflow: "Oversetter", agent: "Mac (tidligere)" };
 const OUTPUT_SOURCE = { cloud: "sky", manual: "manuell", agent: "Mac" };
+// Det som skjedde i nettleseren hennes (web/js/api.js track).
+const TYPE_LABELS = {
+  "client.page": "Åpnet siden",
+  "client.file_rejected": "Filer ikke tatt med",
+  "client.upload_failed": "Opplasting feilet",
+  "client.error_shown": "Feilmelding vist",
+  "client.error": "Feil i nettleseren",
+};
+// Hvorfor en sending ble slettet (sendings.deleted_reason); «expired» har egen tekst.
+const SENDING_DELETED = {
+  cleanup: " (tomt utkast, ryddet bort av nettsiden)",
+  language: " (byttet språk – filene ble lastet opp på nytt i en ny sending)",
+};
+// Filer hun fjernet fra et utkast eller erstattet (files.deleted_reason); «sending» = slettet med sendingen.
+const FILE_REMOVED = {
+  removed: ["Fjernet", (who) => `Fjernet av ${who}`],
+  cleanup: ["Fjernet", () => "Fjernet av nettsiden (var ikke lenger i listen)"],
+  replaced: ["Erstattet", () => "Erstattet – samme fil lastet opp på nytt"],
+};
 
 let me = null;
 let current = "";
 let timer = 0;
 let sendings = [];
+let sendingsLimit = SENDINGS_PAGE;
 let resultTarget = null; // filen en manuell oversettelse skal lastes opp til
+let logUsers = null; // brukerne i «Bruker»-filteret, hentet én gang
 const replyDrafts = new Map();
 const callsCache = new Map(); // fil-ID → { calls, count } for «Grok-kall», så åpne lister overlever oppdatering
+const timelineCache = new Map(); // sending-ID → { events, more } for «Historikk»
 const log = { events: [], more: false };
 
 // ---------- Små hjelpere ----------
@@ -82,16 +108,6 @@ function generatePassword(length = 14) {
     }
   }
   return out;
-}
-
-// "Safari på iPhone", "Chrome på Windows", "InnNorsk Varsel (iPhone)".
-function describeAgent(ua = "") {
-  if (/CFNetwork|InnNorsk/i.test(ua)) return "InnNorsk Varsel (iPhone)";
-  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
-    : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
-  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome"
-    : /Safari\//.test(ua) ? "Safari" : "";
-  return [browser, os].filter(Boolean).join(" på ") || ua.slice(0, 60) || "Ukjent nettleser";
 }
 
 // ---------- Faner ----------
@@ -156,7 +172,72 @@ async function loadOverview() {
   const overview = await api("/api/admin/overview");
   renderTranslator(overview.translator || {}, overview.estimator);
   renderStats(overview);
+  renderActivity(overview.activity || []);
   renderDevices(Array.isArray(overview.devices) ? overview.devices : (await api("/api/admin/devices")).devices || []);
+}
+
+// ---------- Aktivitet per bruker (Oversikt) ----------
+
+function renderActivity(list) {
+  fill($("activity"), list.map(activityCard));
+  $("activity").hidden = !list.length;
+}
+
+const ago = (value) => (value ? h("span", { title: formatWhen(value) }, relativeTime(value)) : "–");
+
+function activityCard(a) {
+  const online = a.onlineSeenAt && Date.now() - Date.parse(a.onlineSeenAt) < ONLINE_MS;
+  const w = a.week || {};
+  const p = a.problems24h || {};
+  const name = a.displayName || a.username;
+  const week = w.sendings
+    ? [plural(w.sendings, "sending", "sendinger"), plural(w.files || 0, "fil", "filer"),
+      w.done ? `${formatNumber(w.done)} ferdig` : "", w.failed ? `${formatNumber(w.failed)} ikke oversatt` : ""].filter(Boolean).join(" · ")
+    : "Ingen sendinger";
+  return h("article", { class: "card activity", "aria-label": `Aktivitet for ${name}` },
+    h("div", { class: "card-head" },
+      h("div", { class: `status-head${online ? " is-ok" : ""}` },
+        h("span", { class: "status-dot", "aria-hidden": "true" }),
+        h("div", null,
+          h("h2", null, name, a.disabled ? " " : null, a.disabled ? pill("failed", "Deaktivert") : null),
+          h("p", { class: "muted small" }, online
+            ? "Har siden åpen nå"
+            : a.lastSeenAt ? ["Sist innom ", ago(a.lastSeenAt)] : "Har ikke vært innom ennå"))),
+      h("div", { class: "item-actions" },
+        button("Vis loggen", () => showLogFor(a.userId, name)),
+        p.total ? button("Vis problemer", () => showLogFor(a.userId, name, { problems: true })) : null)),
+    h("dl", { class: "facts" },
+      fact("Sist innlogget", ago(a.lastLoginAt)),
+      fact("Sist lastet opp", ago(a.lastUploadAt)),
+      fact("Sist sendt", ago(a.lastSentAt)),
+      fact("Sist lastet ned", ago(a.lastDownloadAt)),
+      fact("Siste 7 dager", week)),
+    problemsBlock(p));
+}
+
+function problemsBlock(p) {
+  if (!p.total) return h("p", { class: "muted small" }, "Ingen problemer det siste døgnet.");
+  const parts = [
+    p.failedFiles ? plural(p.failedFiles, "fil feilet", "filer feilet") : "",
+    p.errorsShown ? plural(p.errorsShown, "feilmelding vist", "feilmeldinger vist") : "",
+    p.uploadProblems ? plural(p.uploadProblems, "problem med opplasting", "problemer med opplasting") : "",
+  ].filter(Boolean);
+  return h("div", { class: "problems" },
+    h("p", { class: "small" }, h("strong", { class: "bad" }, `Problemer siste 24 t: ${plural(p.total, "hendelse", "hendelser")}`),
+      parts.length ? ` · ${parts.join(" · ")}` : ""),
+    h("ul", { class: "problem-list" }, (p.recent || []).map((e) => h("li", { class: `small lvl-line lvl-line-${e.level}` },
+      h("time", { dateTime: e.ts, title: formatWhen(e.ts) }, formatClock(e.ts)), " ", e.message || e.type))));
+}
+
+// Til Logg, filtrert på brukeren (og eventuelt bare advarsler og feil).
+function showLogFor(userId, name, { problems = false } = {}) {
+  userOption(userId, name);
+  $("log-user").value = String(userId);
+  $("log-level").value = problems ? "problems" : "";
+  $("log-source").value = "";
+  $("log-type").value = "";
+  $("log-q").value = "";
+  select("logg", true);
 }
 
 function fact(label, value, cls = "") {
@@ -260,6 +341,10 @@ function renderStats({ counts = {}, storage = {}, users, limits = {} }) {
     tile(formatNumber(counts.doneToday), "Ferdig i dag"),
     tile(formatNumber(counts.failed), "Feilet", counts.failed ? "stat-bad" : ""),
     tile(formatBytes(storage.bytes), `Lagret · ${plural(storage.files || 0, "fil", "filer")}`),
+    // Slettet av brukeren, men fortsatt i R2 (og med i lagringstaket) til cron sletter det for godt.
+    storage.deletedBytes
+      ? tile(formatBytes(storage.deletedBytes), `Slettet, beholdes ${plural(storage.retainDays || 0, "dag", "dager")} · ${plural(storage.deletedFiles || 0, "fil", "filer")}`)
+      : null,
     typeof users === "number" ? tile(formatNumber(users), "Brukere") : null,
     limitTile(limits.day, "Tak siste døgn", chars),
     limitTile(limits.month, "Tak siste 30 dager", chars),
@@ -301,14 +386,19 @@ $("btn-test-push").addEventListener("click", async (e) => {
 
 // ---------- Sendinger ----------
 
+// Med «Vis også slettede»: sendinger og filer Svetlana har slettet (til de slettes for godt), gamle utkast og historikk.
 async function loadSendings(auto) {
   if (auto && busyTyping()) return;
-  sendings = (await api("/api/admin/sendings?limit=50")).sendings || [];
+  const withDeleted = $("sendings-deleted").checked;
+  const max = withDeleted ? 500 : 200;
+  sendings = (await api(`/api/admin/sendings?limit=${sendingsLimit}${withDeleted ? "&all=1" : ""}`)).sendings || [];
   const open = new Set([...$("sendings").querySelectorAll("details[open]")].map((d) => d.dataset.key));
-  $("sendings-count").textContent = `${plural(sendings.length, "sending", "sendinger")} (de siste 50)`;
+  const deleted = sendings.filter((s) => s.deletedAt).length;
+  $("sendings-count").textContent = `${plural(sendings.length, "sending", "sendinger")}${deleted ? `, herav ${formatNumber(deleted)} slettet` : ""} (de siste ${sendingsLimit})`;
   fill($("sendings"), sendings.length
     ? sendings.map((s) => sendingCard(s, open))
     : h("p", { class: "card muted" }, "Ingen sendinger ennå."));
+  $("sendings-more").hidden = sendings.length < sendingsLimit || sendingsLimit >= max;
 }
 
 function countsText(c = {}) {
@@ -351,22 +441,67 @@ function sendingFacts(s) {
 function sendingCard(s, open) {
   const who = s.displayName || s.username || "Ukjent";
   const facts = sendingFacts(s);
-  return h("article", { class: "card acard" },
+  const deleted = Boolean(s.deletedAt);
+  return h("article", { class: `card acard${deleted ? " is-deleted" : ""}` },
     h("div", { class: "acard-head" },
       h("div", null,
         h("h3", null, who, s.username && s.displayName ? h("span", { class: "muted" }, ` (${s.username})`) : null),
         h("p", { class: "muted small" }, [
           s.sentAt ? `Startet ${formatWhen(s.sentAt)}` : `Opprettet ${formatWhen(s.createdAt)}`,
           LANGUAGE_LABELS[s.targetLanguage],
-          plural(s.files.length, "fil", "filer"),
+          plural(s.counts ? s.counts.total : s.files.length, "fil", "filer"),
           countsText(s.counts),
         ].filter(Boolean).join(" · ")),
         facts ? h("p", { class: "muted small" }, facts) : null),
       pill(s.status, SENDING_STATUS[s.status] || s.status)),
+    deleted ? deletedNote(s, who) : retainedNote(s, who),
     s.note ? h("p", { class: "my-note" }, h("span", { class: "muted" }, `Melding fra ${who}: `), `«${s.note}»`) : null,
-    h("ul", { class: "afiles" }, s.files.map((f) => adminFile(f, open, s))),
-    s.status === "draft" ? null : replyForm(s, who)
+    h("ul", { class: "afiles" }, s.files.map((f) => adminFile(f, open, s, who))),
+    timelineDetails(s, open),
+    s.status === "draft" || deleted ? null : replyForm(s, who)
   );
+}
+
+// Tidligste tidspunkt noe av det slettede slettes for godt.
+const firstPurge = (files) => files.map((f) => f.purgeAt).filter(Boolean).sort()[0];
+
+// «Slettet av Svetlana i dag 14:05», og om filene fortsatt kan lastes ned.
+function deletedNote(s, who) {
+  const text = s.deletedReason === "expired"
+    ? `Slettet automatisk ${formatWhen(s.deletedAt)} (utkastet ble aldri sendt)`
+    : `Slettet av ${s.deletedBy || who} ${formatWhen(s.deletedAt)}${SENDING_DELETED[s.deletedReason] || ""}`;
+  const kept = s.files.filter((f) => !f.purgedAt);
+  const purged = s.files.filter((f) => f.purgedAt);
+  return h("div", { class: "deleted-note" },
+    h("p", null, h("strong", null, text)),
+    kept.length
+      ? h("p", { class: "small" }, `${who} ser ikke filene lenger. Du kan laste dem ned til ${formatWhen(firstPurge(kept))}; da slettes de for godt.`,
+        " ", purgeButton(s))
+      : purged.length ? h("p", { class: "small muted" }, `Filene ble slettet for godt ${formatWhen(purged[0].purgedAt)}.`) : null);
+}
+
+// Filer hun har fjernet eller erstattet i en sending som ellers finnes.
+function retainedNote(s, who) {
+  const kept = s.files.filter((f) => f.deletedAt && !f.purgedAt);
+  if (!kept.length) return null;
+  return h("p", { class: "small muted" },
+    `${plural(kept.length, "fil", "filer")} som ${who} har fjernet eller erstattet, kan lastes ned til ${formatWhen(firstPurge(kept))}.`, " ", purgeButton(s));
+}
+
+function purgeButton(s) {
+  return h("button", {
+    type: "button",
+    class: "btn-quiet",
+    onclick: async () => {
+      const ok = await confirmDialog({
+        title: "Slette filene for godt nå?",
+        text: "Originalene og oversettelsene som er slettet her, fjernes fra lagringen med én gang. Historikken blir stående.",
+        confirm: "Slett for godt",
+        danger: true,
+      });
+      if (ok) act(() => api(`/api/admin/sendings/${enc(s.id)}/purge`, { method: "POST" }), "Filene er slettet for godt.");
+    },
+  }, icon("trash"), "Slett for godt nå");
 }
 
 // «Tid: estimert ca. 3 min, faktisk 2 min 41 s · 6 kall · 12 345 inn / 6 789 ut tokens · $0.0123»
@@ -388,9 +523,15 @@ function fileMetrics(f) {
   ].filter(Boolean).join(" · ");
 }
 
-function adminFile(f, open, s) {
+function adminFile(f, open, s, who) {
+  // Fjernet eller erstattet av henne (ikke slettet sammen med sendingen).
+  const removed = FILE_REMOVED[f.deletedReason];
+  // Slettet (av henne eller med sendingen): kan lastes ned til den slettes for godt, men ikke endres.
+  const frozen = Boolean(f.deletedAt || s.deletedAt);
+  const stored = !f.purgedAt;
   // Filer i et utkast (også de som ikke kunne leses) er ikke sendt; serveren avviser kø og manuell opplasting.
-  const sent = f.status !== "draft" && s.status !== "draft";
+  const sent = !frozen && f.status !== "draft" && s.status !== "draft";
+  const stopped = frozen && ["sent", "working"].includes(f.status);
   const source = field(f, "outputSource", "output_source");
   const facts = [
     f.bytes != null ? formatBytes(f.bytes) : "",
@@ -403,11 +544,18 @@ function adminFile(f, open, s) {
   const key = `err-${f.id}`;
   const calls = field(f, "calls", "calls");
   const hasCalls = calls != null ? Number(calls) > 0 : ["working", "done", "failed"].includes(f.status);
-  return h("li", { class: "afile" },
+  // Det hun ser ved filen, der det sier noe mer enn statusen («Klar – ca. 3 min», «Denne PDF-en er et bilde …»).
+  const seen = !frozen && ["draft", "failed"].includes(f.status) && f.statusText;
+  const outputName = field(f, "outputName", "output_name");
+  return h("li", { class: `afile${removed ? " is-removed" : ""}` },
     extBadge(f.name),
     h("div", { class: "afile-main" },
       h("p", { class: "afile-name" }, dirName(f.path || "") ? h("span", { class: "q-dir" }, dirName(f.path)) : null, f.name || baseName(f.path)),
-      h("p", { class: "small" }, pill(f.status, STATUS[f.status] || f.status), " ", h("span", { class: "muted" }, facts)),
+      h("p", { class: "small" },
+        removed ? pill("deleted", removed[0]) : pill(f.status, stopped ? "Stoppet" : STATUS[f.status] || f.status),
+        " ", h("span", { class: "muted" }, facts)),
+      removed ? h("p", { class: "small muted" }, `${removed[1](who)} ${formatWhen(f.deletedAt)}`) : null,
+      seen ? h("p", { class: "small muted" }, `${who} ser: «${f.statusText}»`) : null,
       metrics ? h("p", { class: "small metrics" }, metrics) : null,
       f.error ? h("p", { class: "small bad" }, f.error) : null,
       f.errorDetails
@@ -415,8 +563,12 @@ function adminFile(f, open, s) {
         : null,
       hasCalls ? callsDetails(f, open) : null),
     h("div", { class: "afile-actions" },
-      h("a", { class: "btn-quiet", href: `/api/files/${enc(f.id)}/original`, download: "" }, icon("download"), "Original"),
-      f.status === "done" ? h("a", { class: "btn-quiet", href: `/api/files/${enc(f.id)}/result`, download: "" }, icon("download"), "Oversettelse") : null,
+      stored ? h("a", { class: "btn-quiet", href: `/api/files/${enc(f.id)}/original`, download: "" }, icon("download"), "Original") : null,
+      // En tidligere oversettelse kan lastes ned også mens filen oversettes på nytt, eller etter at den er slettet.
+      stored && outputName
+        ? h("a", { class: "btn-quiet", href: `/api/files/${enc(f.id)}/result`, download: "" }, icon("download"), f.status === "done" ? "Oversettelse" : "Forrige oversettelse")
+        : null,
+      stored ? null : h("span", { class: "small muted purged" }, `Slettet for godt ${formatWhen(f.purgedAt)}`),
       sent ? h("button", { type: "button", class: "btn-quiet", onclick: () => pickResult(f) }, icon("upload"), "Last opp oversettelse") : null,
       sent && ["failed", "working", "done"].includes(f.status)
         ? h("button", { type: "button", class: "btn-quiet", onclick: () => requeue(f) }, icon("refresh"), "Sett i kø igjen")
@@ -511,6 +663,54 @@ function renderCalls(body, calls) {
 
 const isOk = (c) => (c.ok != null ? Boolean(c.ok) : c.status >= 200 && c.status < 300);
 
+// «Historikk»: alt i loggen for sendingen, eldste først (opprettet, filer lastet opp eller avvist, sendt, oversatt,
+// lastet ned, slettet …). Hentes når den åpnes, og på nytt ved hver oppdatering så lenge den er åpen.
+function timelineDetails(s, open) {
+  const key = `timeline-${s.id}`;
+  const body = h("div", { class: "timeline-body" });
+  const details = h("details", { class: "small timeline", "data-key": key, open: open.has(key) }, h("summary", null, "Historikk"), body);
+  const cached = timelineCache.get(s.id);
+  if (cached) renderTimeline(body, cached, s);
+  details.addEventListener("toggle", () => {
+    if (details.open) loadTimeline(s, body);
+  });
+  return details;
+}
+
+async function loadTimeline(s, body) {
+  if (!timelineCache.has(s.id)) fill(body, h("p", { class: "muted" }, "Henter historikken …"));
+  try {
+    const { events, nextBeforeId } = await api(`/api/admin/events?sendingId=${enc(s.id)}&limit=${TIMELINE_MAX}`);
+    const entry = { events: (events || []).reverse(), more: Boolean(nextBeforeId) };
+    timelineCache.set(s.id, entry);
+    renderTimeline(body, entry, s);
+  } catch (err) {
+    fill(body, h("p", { class: "bad" }, err.message));
+  }
+}
+
+// Hvem: avsenderen med navn, andre med brukernavn, ellers kilden (Workflowen og cron logger som «System»).
+function actor(ev, s) {
+  if (ev.userId != null && ev.userId === s.userId) return s.displayName || ev.username;
+  return ev.username || SOURCES[ev.source] || ev.source || "";
+}
+
+function renderTimeline(body, { events, more }, s) {
+  if (!events.length) {
+    fill(body, h("p", { class: "muted" }, "Ingen hendelser for denne sendingen."));
+    return;
+  }
+  fill(body,
+    more ? h("p", { class: "muted" }, `Viser de siste ${TIMELINE_MAX} hendelsene.`) : null,
+    h("ol", { class: "timeline-list" }, events.map((ev) => {
+      const d = new Date(ev.ts);
+      return h("li", { class: `tl lvl-line lvl-line-${ev.level}` },
+        h("time", { dateTime: ev.ts, title: d.toLocaleString("nb-NO") }, `${formatWhen(ev.ts)}:${String(d.getSeconds()).padStart(2, "0")}`),
+        h("span", { class: "tl-who" }, actor(ev, s)),
+        h("span", { class: "tl-msg" }, ev.message || ev.type, TYPE_LABELS[ev.type] ? h("span", { class: "muted" }, ` · ${TYPE_LABELS[ev.type]}`) : null));
+    })));
+}
+
 function replyForm(s, who) {
   const id = `reply-${s.id}`;
   const area = h("textarea", { id, rows: 2, maxLength: 2000, placeholder: `For eksempel: Her er det! Si fra om noe er uklart.` });
@@ -547,12 +747,33 @@ $("result-input").addEventListener("change", async (e) => {
   }), "Oversettelsen er lastet opp og merket som ferdig.");
 });
 $("sendings-refresh").addEventListener("click", () => load());
+$("sendings-deleted").addEventListener("change", () => {
+  sendingsLimit = SENDINGS_PAGE;
+  load();
+});
+$("sendings-more").addEventListener("click", () => {
+  sendingsLimit += SENDINGS_PAGE;
+  load();
+});
 
 // ---------- Logg ----------
 
+// «Bruker»-filteret: brukerne hentes én gang (og en bruker legges til med én gang ved «Vis loggen» fra Oversikt).
+function userOption(id, name, username) {
+  const list = $("log-user");
+  if ([...list.options].some((o) => o.value === String(id))) return;
+  list.append(h("option", { value: String(id) }, username && username !== name ? `${name} (${username})` : name));
+}
+
+async function loadLogUsers() {
+  if (logUsers) return;
+  logUsers = (await api("/api/admin/users")).users || [];
+  for (const u of logUsers) userOption(u.id, u.displayName || u.username, u.username);
+}
+
 function logUrl(beforeId) {
   const params = new URLSearchParams();
-  for (const [key, id] of [["level", "log-level"], ["source", "log-source"], ["type", "log-type"], ["q", "log-q"]]) {
+  for (const [key, id] of [["level", "log-level"], ["userId", "log-user"], ["source", "log-source"], ["type", "log-type"], ["q", "log-q"]]) {
     const value = $(id).value.trim();
     if (value) params.set(key, value);
   }
@@ -584,6 +805,7 @@ function eventRow(ev, isNew) {
       h("time", { dateTime: ev.ts, title: d.toLocaleString("nb-NO") }, `${when[0].toUpperCase()}${when.slice(1)}:${String(d.getSeconds()).padStart(2, "0")}`),
       h("span", { class: `lvl lvl-${ev.level}` }, LEVELS[ev.level] || ev.level),
       h("code", { class: "ev-type" }, ev.type),
+      TYPE_LABELS[ev.type] ? h("span", { class: "ev-label" }, TYPE_LABELS[ev.type]) : null,
       h("span", { class: "muted" }, [SOURCES[ev.source] || ev.source, ev.username].filter(Boolean).join(" · "))),
     ev.message ? h("p", { class: "ev-msg" }, ev.message) : null,
     details ? h("details", null, h("summary", null, "Detaljer"), h("pre", null, details)) : null
@@ -596,6 +818,7 @@ function renderLog() {
 }
 
 async function loadLog() {
+  await loadLogUsers().catch(() => {}); // filteret er bare til hjelp; loggen vises uansett
   const { events } = await api(logUrl());
   log.events = events || [];
   log.more = log.events.length === LOG_PAGE;
@@ -685,8 +908,13 @@ function userRow(u) {
         disabled ? pill("failed", "Deaktivert") : null, " ",
         u.mustChangePassword ? h("span", { class: "tag" }, "Må lage passord") : null,
         self ? h("span", { class: "tag" }, "Deg") : null),
-      h("p", { class: "muted small" }, `${u.lastLoginAt ? `Sist innlogget ${relativeTime(u.lastLoginAt)}` : "Har ikke logget inn ennå"} · opprettet ${formatWhen(u.createdAt)}`)),
+      h("p", { class: "muted small" }, [
+        u.lastSeenAt ? `Sist aktiv ${relativeTime(u.lastSeenAt)}` : "",
+        u.lastLoginAt ? `sist innlogget ${relativeTime(u.lastLoginAt)}` : "har ikke logget inn ennå",
+        `opprettet ${formatWhen(u.createdAt)}`,
+      ].filter(Boolean).join(" · ").replace(/^./, (ch) => ch.toUpperCase()))),
     h("div", { class: "item-actions" },
+      button("Vis aktivitet", () => showLogFor(u.id, u.displayName || u.username)),
       button("Nytt passord", () => resetPassword(u)),
       button("Endre navn", () => rename(u)),
       self ? null : button(disabled ? "Aktiver" : "Deaktiver", () => patchUser(u, { disabled: !disabled }, disabled ? "Brukeren er aktivert." : "Brukeren er deaktivert og logget ut.")),

@@ -1,5 +1,6 @@
-// Eierens admin: oversikt (xAI-forbruk, kø, lagring, tak, estimatmodell), sendinger med Grok-kall, manuell opplasting,
-// sett i kø igjen, test av xAI, logg, økter, brukere og iPhone-enheter.
+// Eierens admin: oversikt (xAI-forbruk, kø, lagring, tak, estimatmodell, aktivitet per bruker), sendinger med Grok-kall
+// (også de Svetlana har slettet), manuell opplasting, sett i kø igjen, slett for godt, test av xAI, logg, økter, brukere
+// og iPhone-enheter.
 import { Hono } from "hono";
 import grok from "../../src/grok.js";
 import { config } from "../config.js";
@@ -9,7 +10,9 @@ import { fail, readJson, reqCtx, str, clamp } from "../http.js";
 import { USERNAME, requireAdmin, findUserByName, newSecret, normalizeUsername, revokeUserSessions } from "../auth.js";
 import { pushToUser } from "../apns.js";
 import { baseName, sanitizePath, r2Key, contentLength, sizeProblem, putBody } from "../files.js";
-import { listSendings, loadFile, markDone, finishIfDone, sendingView, startWorkflow } from "../sendings.js";
+import {
+  listSendings, loadFile, markDone, finishIfDone, sendingView, startWorkflow, retainedFiles, purgeFiles,
+} from "../sendings.js";
 import { costUsd, estimatorParams, grokOptions, recordCall } from "../xai.js";
 import { quotaStatus, reserveTranslation, releaseTranslation } from "../quota.js";
 
@@ -17,7 +20,14 @@ const SOURCES = ["web", "ios", "system"];
 // Oversettelser kan bli større enn originalen (PDF → Word).
 const RESULT_MAX_MB = 100;
 const ROLES = ["admin", "user"];
+const WEEK_MS = 7 * DAY_MS;
+const RECENT_PROBLEMS = 5;
 const likeArg = (q) => `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+
+// Hendelser som gjelder en bruker: det hun gjorde selv, og det Workflowen og cron gjorde med sendingene hennes (de logger
+// uten bruker). Det eieren gjør med sendingene hennes (nedlasting, «Sett i kø igjen»), er hans egne hendelser.
+const USER_EVENTS = "(e.user_id = ? OR (e.user_id IS NULL AND e.sending_id IN (SELECT id FROM sendings WHERE user_id = ?)))";
+const PROBLEM = "e.level IN ('warn', 'error')";
 
 // Midnatt i dag, norsk tid, som ISO (UTC). Bruker dagens UTC-avvik (bommer med en time de to natta sommertid skifter).
 function osloMidnight() {
@@ -56,6 +66,7 @@ function serializeUser(u) {
     mustChangePassword: Boolean(u.must_change_password),
     createdAt: u.created_at,
     lastLoginAt: u.last_login_at,
+    lastSeenAt: u.last_seen_at ?? null,
     activeSessions: u.active_sessions ?? 0,
   };
 }
@@ -94,12 +105,78 @@ function serializeCall(env, r) {
   };
 }
 
+// last_seen_at: økten flyttes fram maks én gang i minuttet mens siden er åpen (den spør etter filene hvert 5.–30. sekund).
 const USER_SELECT = `SELECT u.*, (SELECT COUNT(*) FROM sessions s WHERE s.user_id = u.id AND s.revoked_at IS NULL AND s.expires_at > ?)
-  AS active_sessions FROM users u`;
+  AS active_sessions, (SELECT MAX(t) FROM (SELECT MAX(last_seen_at) AS t FROM sessions WHERE user_id = u.id UNION ALL SELECT MAX(ts) FROM events WHERE user_id = u.id)) AS last_seen_at FROM users u`;
 const DEVICE_SELECT = "SELECT d.*, u.username FROM devices d LEFT JOIN users u ON u.id = d.user_id ORDER BY d.created_at";
 
 const loadUser = async (env, id) =>
   (await one(env, `${USER_SELECT} WHERE u.id = ?`, nowIso(), Number(id))) || fail(404, "Fant ikke brukeren.");
+
+// Aktivitetskortet i Oversikt: én per bruker som sender filer (rollen user), så eieren ser om hun har vært innom,
+// hva hun har gjort, og om noe har gått galt for henne det siste døgnet.
+async function userActivity(env) {
+  const users = await all(
+    env,
+    `SELECT u.id, u.username, u.display_name, u.disabled, u.last_login_at,
+       (SELECT MAX(t) FROM (SELECT MAX(last_seen_at) AS t FROM sessions WHERE user_id = u.id UNION ALL SELECT MAX(ts) FROM events WHERE user_id = u.id)) AS last_seen_at,
+       (SELECT MAX(last_seen_at) FROM sessions WHERE user_id = u.id AND revoked_at IS NULL AND expires_at > ?) AS online_seen_at,
+       (SELECT MAX(f.created_at) FROM files f JOIN sendings s ON s.id = f.sending_id WHERE s.user_id = u.id) AS last_upload_at,
+       (SELECT MAX(sent_at) FROM sendings WHERE user_id = u.id) AS last_sent_at,
+       (SELECT MAX(ts) FROM events WHERE user_id = u.id AND type IN ('download.result', 'download.original')) AS last_download_at
+     FROM users u WHERE u.role = 'user' ORDER BY u.username COLLATE NOCASE`,
+    nowIso()
+  );
+  const [weekAgo, dayAgo] = [isoAgo(WEEK_MS), isoAgo(DAY_MS)];
+  const out = [];
+  for (const u of users) {
+    const [week, problems, recent] = await batch(env, [
+      [
+        `SELECT COUNT(DISTINCT s.id) AS sendings, COUNT(f.id) AS files, COALESCE(SUM(f.status = 'done'), 0) AS done,
+           COALESCE(SUM(f.status = 'failed'), 0) AS failed
+         FROM sendings s LEFT JOIN files f ON f.sending_id = s.id AND (f.deleted_at IS NULL OR f.deleted_reason = 'sending')
+         WHERE s.user_id = ? AND s.sent_at >= ?`,
+        u.id, weekAgo,
+      ],
+      [
+        `SELECT COUNT(*) AS total, COALESCE(SUM(e.type = 'file.failed'), 0) AS failedFiles,
+           COALESCE(SUM(e.type = 'client.error_shown'), 0) AS errorsShown,
+           COALESCE(SUM(e.type IN ('client.upload_failed', 'client.file_rejected', 'upload.failed', 'file.rejected')), 0) AS uploadProblems
+         FROM events e WHERE e.ts >= ? AND ${PROBLEM} AND ${USER_EVENTS}`,
+        dayAgo, u.id, u.id,
+      ],
+      [
+        `SELECT e.id, e.ts, e.level, e.type, e.message, e.sending_id FROM events e
+         WHERE e.ts >= ? AND ${PROBLEM} AND ${USER_EVENTS} ORDER BY e.id DESC LIMIT ?`,
+        dayAgo, u.id, u.id, RECENT_PROBLEMS,
+      ],
+    ]);
+    out.push({
+      userId: u.id,
+      username: u.username,
+      displayName: u.display_name || u.username,
+      disabled: Boolean(u.disabled),
+      lastSeenAt: u.last_seen_at,
+      onlineSeenAt: u.online_seen_at,
+      lastLoginAt: u.last_login_at,
+      lastUploadAt: u.last_upload_at,
+      lastSentAt: u.last_sent_at,
+      lastDownloadAt: u.last_download_at,
+      week: week.results[0],
+      problems24h: {
+        ...problems.results[0],
+        recent: recent.results.map((e) => ({ id: e.id, ts: e.ts, level: e.level, type: e.type, message: e.message, sendingId: e.sending_id })),
+      },
+    });
+  }
+  return out;
+}
+
+// Slettet av henne: kan lastes ned, men ingenting skal startes eller endres.
+function refuseDeleted(f) {
+  if (f.sending_deleted_at) fail(410, "Sendingen er slettet. Filene kan lastes ned, men ikke endres eller oversettes på nytt.");
+  if (f.deleted_at) fail(410, "Filen er fjernet fra sendingen. Den kan lastes ned, men ikke endres eller oversettes.");
+}
 
 const admin = new Hono();
 admin.use("*", requireAdmin);
@@ -113,9 +190,12 @@ admin.get("/overview", async (c) => {
        FROM files WHERE deleted_at IS NULL`,
       osloMidnight(),
     ],
+    // Alt som ligger i R2, og hvor mye av det som er slettet av henne og venter på å slettes for godt.
     [
-      `SELECT COUNT(*) + COUNT(output_bytes) AS files, COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS bytes
-       FROM files WHERE deleted_at IS NULL`,
+      `SELECT COUNT(*) + COUNT(output_bytes) AS files, COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS bytes,
+         COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 0 ELSE 1 + (output_bytes IS NOT NULL) END), 0) AS deletedFiles,
+         COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 0 ELSE COALESCE(bytes, 0) + COALESCE(output_bytes, 0) END), 0) AS deletedBytes
+       FROM files WHERE purged_at IS NULL`,
     ],
     [DEVICE_SELECT],
     ["SELECT COUNT(*) AS n FROM users"],
@@ -143,22 +223,40 @@ admin.get("/overview", async (c) => {
       lastErrorAt: error ? error.ts : null,
     },
     counts: counts.results[0],
-    storage: storage.results[0],
+    storage: { ...storage.results[0], retainDays: config(env).retainDeletedDays },
     devices: devices.results.map(serializeDevice),
     users: users.results[0].n,
+    activity: await userActivity(env),
     estimator: { a: Number(params.a.toFixed(2)), b: Number(params.b.toFixed(5)), samples: params.samples, source: params.source },
     limits: await quotaStatus(env),
   });
 });
 
-admin.get("/sendings", async (c) =>
-  c.json(await listSendings(c.env, { limit: clamp(c.req.query("limit"), 1, 200, 50), admin: true })));
+// ?all=1 (nettsidens admin): også slettede sendinger, gamle utkast og filer hun har fjernet eller erstattet.
+// Uten all=1 er listen som før (iPhone-appen).
+admin.get("/sendings", async (c) => {
+  const withDeleted = c.req.query("all") === "1";
+  return c.json(await listSendings(c.env, { limit: clamp(c.req.query("limit"), 1, withDeleted ? 500 : 200, 50), admin: true, withDeleted }));
+});
+
+// «Slett for godt nå»: det Svetlana har slettet i sendingen (hele sendingen, eller filer hun har fjernet eller erstattet),
+// fjernes fra R2 med én gang i stedet for etter RETAIN_DELETED_DAYS. Radene blir stående som historikk.
+admin.post("/sendings/:id/purge", async (c) => {
+  const env = c.env;
+  const id = c.req.param("id");
+  if (!(await one(env, "SELECT 1 AS ok FROM sendings WHERE id = ?", id))) fail(404, "Fant ikke sendingen.");
+  const files = await retainedFiles(env, { sendingId: id, limit: 1000 });
+  if (!files.length) fail(409, "Det er ingen slettede filer å slette for godt i denne sendingen.");
+  await purgeFiles(env, files, { reason: "admin", why: `av ${c.get("user").displayName}`, ctx: reqCtx(c) });
+  return c.json({ sending: await sendingView(env, id, true, { withDeleted: true }) });
+});
 
 const notSentYet = (f) => f.status === "draft" || f.sending_status === "draft";
 
 admin.put("/files/:fileId/result", async (c) => {
   const env = c.env;
-  const f = await loadFile(c, c.req.param("fileId"));
+  const f = await loadFile(c, c.req.param("fileId"), { withDeleted: true });
+  refuseDeleted(f);
   if (notSentYet(f)) fail(409, "Filen er ikke sendt ennå.");
   const name = baseName(sanitizePath(c.req.query("name")));
   if (!name) fail(400, "Filnavnet på oversettelsen mangler.");
@@ -175,7 +273,8 @@ admin.put("/files/:fileId/result", async (c) => {
 // message er en valgfri tekst Svetlana ser (brukes for «failed»).
 admin.post("/files/:fileId/status", async (c) => {
   const env = c.env;
-  const f = await loadFile(c, c.req.param("fileId"));
+  const f = await loadFile(c, c.req.param("fileId"), { withDeleted: true });
+  refuseDeleted(f);
   const body = await readJson(c);
   const message = str(body.message, 1000).trim() || null;
   const now = nowIso();
@@ -210,7 +309,7 @@ admin.post("/files/:fileId/status", async (c) => {
 });
 
 admin.get("/files/:fileId/calls", async (c) => {
-  const f = await loadFile(c, c.req.param("fileId"));
+  const f = await loadFile(c, c.req.param("fileId"), { withDeleted: true });
   const rows = await all(c.env, "SELECT * FROM grok_calls WHERE file_id = ? ORDER BY id DESC LIMIT 200", f.id);
   return c.json({ calls: rows.map((r) => serializeCall(c.env, r)) });
 });
@@ -254,8 +353,11 @@ admin.get("/events", async (c) => {
     where.push(sql);
     args.push(...values);
   };
-  if (LEVELS.includes(q.level)) add("e.level = ?", q.level);
+  // «problems» = advarsler og feil.
+  if (q.level === "problems") add(PROBLEM);
+  else if (LEVELS.includes(q.level)) add("e.level = ?", q.level);
   if (SOURCES.includes(q.source)) add("e.source = ?", q.source);
+  if (/^\d+$/.test(q.userId || "")) add(USER_EVENTS, Number(q.userId), Number(q.userId));
   // «auth.» gir alle auth-hendelser.
   if (q.type) {
     if (q.type.endsWith(".")) add("e.type LIKE ? ESCAPE '\\'", `${q.type.replace(/[\\%_]/g, "\\$&")}%`);

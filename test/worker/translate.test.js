@@ -1,6 +1,7 @@
 // Oversettelsen i Cloudflare (Workflowen TranslateSending) mot ekte wrangler dev og en falsk xAI som byttes underveis:
 // nynorsk, feil antall fra Grok, nøkkelen avvist (401) midt i en fil, sett i kø igjen uten å betale to ganger,
-// cron som rydder opp etter en stoppet oversettelse, og sletting midt i oversettelsen. Kaller aldri ekte xAI eller Apple.
+// en oversettelse klargjort av en eldre versjon (uten lagret plan), cron som rydder opp etter en stoppet oversettelse,
+// og sletting midt i oversettelsen (eieren beholder filene). Kaller aldri ekte xAI eller Apple.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -102,7 +103,8 @@ test("nøkkelen avvises (401) midt i en fil: filen feiler vennlig, resten av sen
   assert.ok(files[0].costUsd > 0, "den vellykkede batchen koster");
   const [first] = await dev.sql("SELECT progress_percent FROM files WHERE id = ?", files[0].id);
   assert.equal(first.progress_percent, null);
-  assert.deepEqual((await dev.r2Keys(`work/${files[0].id}/`)).sort(), [`work/${files[0].id}/b-0.json`, `work/${files[0].id}/strings.json`], "den ferdige batchen er tatt vare på");
+  assert.deepEqual((await dev.r2Keys(`work/${files[0].id}/`)).sort(),
+    [`work/${files[0].id}/b-0.json`, `work/${files[0].id}/plan.json`, `work/${files[0].id}/strings.json`], "den ferdige batchen og planen er tatt vare på");
 
   const rows = await dev.sql("SELECT status, ok, error FROM grok_calls WHERE file_id = ? ORDER BY id", files[0].id);
   assert.deepEqual(rows.map((r) => [r.status, r.ok]), [[200, 1], [401, 0]]);
@@ -149,6 +151,95 @@ test("sett i kø igjen når nøkkelen virker: ferdige batcher gjenbrukes (ingen 
   assert.ok(events[0].n >= 2, "ferdig igjen");
 });
 
+// Mellomlageret direkte (wranglers Local Explorer), for å etterligne en fil som ble klargjort av en eldre versjon.
+const r2Url = (key = "") => `${dev.url}/cdn-cgi/local/explorer/api/r2/buckets/innnorsk-files/objects${key ? `/${encodeURIComponent(key)}` : ""}`;
+const r2Get = async (key) => {
+  const res = await fetch(r2Url(key));
+  return res.ok ? res.text() : null;
+};
+async function r2Put(key, body) {
+  assert.ok((await fetch(r2Url(key), { method: "PUT", body })).ok, `R2 PUT ${key}`);
+}
+async function r2Delete(key) {
+  const res = await fetch(r2Url(), { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify([key]) });
+  assert.ok(res.ok, `R2 DELETE ${key}`);
+  assert.equal(await r2Get(key), null);
+}
+
+test("oppdelingen i batcher lagres ved start: en oversettelse klargjort av en eldre versjon (uten plan.json) fortsetter når oppdelingen blir den samme, og stopper med en tydelig feil når den ikke blir det, uten å hoppe over tekst; satt i kø igjen blir alt oversatt", async () => {
+  // 150 avsnitt à ca. 75 tegn gir 6 batcher (28 per batch), altså to steg à 4 batcher.
+  const lines = Array.from({ length: 150 }, (_, i) => `Line ${i + 1} of the long letter, with a few more words to make it a little longer.`);
+  const text = `${lines.join("\n\n")}\n`;
+  const expected = `${lines.map((l) => `NB:${l.toUpperCase()}`).join("\n\n")}\n`;
+  const firstBatch = (fileId) => eventually(async () => (await dev.sql("SELECT COUNT(*) AS n FROM batches WHERE file_id = ?", fileId))[0].n >= 1,
+    { timeoutMs: 30000, what: "første batch er ferdig" });
+
+  // Samme oppdeling: planen mangler (eldre versjon), men blir den samme når den lages på nytt.
+  dev.xai.setMode("slow", 1200);
+  const same = await svetlana.send({ "samme.txt": text });
+  const sameId = same.files[0].id;
+  await firstBatch(sameId);
+  const plan = JSON.parse(await r2Get(`work/${sameId}/plan.json`));
+  assert.equal(plan.batches.length, 6);
+  assert.deepEqual(plan.batches.map((b) => b.i.length), [28, 28, 28, 28, 28, 10]);
+  await r2Delete(`work/${sameId}/plan.json`);
+  const doneSame = await finished(same.id);
+  assert.equal(doneSame.files[0].status, "done");
+  assert.equal((await svetlana.get(`/api/files/${sameId}/result`)).data.toString("utf8"), expected);
+
+  // Annen oppdeling (en eldre versjon leste teksten annerledes): filen stopper med en tydelig feil.
+  const other = await svetlana.send({ "annen.txt": text });
+  const otherId = other.files[0].id;
+  await firstBatch(otherId);
+  const strings = JSON.parse(await r2Get(`work/${otherId}/strings.json`));
+  strings[0][149] += " An older version of the reader saw one more sentence here.";
+  await r2Put(`work/${otherId}/strings.json`, JSON.stringify(strings));
+  await r2Delete(`work/${otherId}/plan.json`);
+  const failed = await finished(other.id);
+  assert.equal(failed.files[0].status, "failed");
+  const [row] = (await theirs(other.id)).files;
+  assert.match(row.error, /^Programmet ble oppdatert mens filen ble oversatt.*Sett filen i kø igjen\.$/);
+
+  // Satt i kø igjen: de gamle batchene gjelder en annen tekst og brukes ikke; hele filen oversettes riktig.
+  dev.xai.setMode("upper");
+  const before = dev.xai.state.requests.length;
+  assert.equal((await admin.post(`/api/admin/files/${otherId}/status`, { status: "sent" })).status, 200);
+  await eventually(async () => (await theirs(other.id)).files[0].status === "done", { timeoutMs: 30000, what: "filen blir ferdig" });
+  assert.equal(requestsSince(before).length, 6, "alle seks batchene oversettes på nytt");
+  assert.equal((await svetlana.get(`/api/files/${otherId}/result`)).data.toString("utf8"), expected);
+  assert.deepEqual(await dev.r2Keys(`work/${otherId}/`), [], "mellomlageret er ryddet");
+});
+
+test("sett i kø igjen etter en endret oppdeling: den lagrede planen avgjør hvilke ferdige batcher som gjelder (uten å lese batchfilene); bare de som ikke stemmer, oversettes på nytt", async () => {
+  const lines = Array.from({ length: 150 }, (_, i) => `Row ${i + 1} of the second long letter, with a few more words to make it longer.`);
+  const text = `${lines.join("\n\n")}\n`;
+  const expected = `${lines.map((l) => `NB:${l.toUpperCase()}`).join("\n\n")}\n`;
+  dev.xai.setMode("slow", 1200);
+  const sending = await svetlana.send({ "delt.txt": text });
+  const fileId = sending.files[0].id;
+  await eventually(async () => (await dev.sql("SELECT COUNT(*) AS n FROM batches WHERE file_id = ?", fileId))[0].n >= 2,
+    { timeoutMs: 30000, what: "to batcher er ferdige" });
+  dev.xai.setMode("fail401");
+  const failed = await finished(sending.id);
+  assert.equal(failed.files[0].status, "failed");
+  const [{ n: doneBefore }] = await dev.sql("SELECT COUNT(*) AS n FROM batches WHERE file_id = ?", fileId);
+  assert.ok(doneBefore >= 2 && doneBefore < 6, `ferdige batcher: ${doneBefore}`);
+
+  // En eldre versjon delte opp annerledes: i den lagrede planen har batch 0 én tekstbit mindre. Planen avgjør alene
+  // (batchfilene leses ikke), så batch 0 oversettes på nytt selv om filen b-0.json har de riktige tekstbitene.
+  const plan = JSON.parse(await r2Get(`work/${fileId}/plan.json`));
+  plan.batches[0].i.pop();
+  await r2Put(`work/${fileId}/plan.json`, JSON.stringify(plan));
+
+  dev.xai.setMode("upper");
+  const before = dev.xai.state.requests.length;
+  assert.equal((await admin.post(`/api/admin/files/${fileId}/status`, { status: "sent" })).status, 200);
+  await eventually(async () => (await theirs(sending.id)).files[0].status === "done", { timeoutMs: 30000, what: "filen blir ferdig" });
+  assert.equal(requestsSince(before).length, 6 - doneBefore + 1, "batch 0 og de som ikke var ferdige; de andre ferdige gjenbrukes");
+  assert.equal((await svetlana.get(`/api/files/${fileId}/result`)).data.toString("utf8"), expected);
+  assert.deepEqual(await dev.r2Keys(`work/${fileId}/`), [], "mellomlageret er ryddet");
+});
+
 test("cron: en fil som har stått fast i over 30 minutter uten levende instans, feiler; en som lever, får fortsette", async () => {
   dev.xai.setMode("upper");
   const stuck = await svetlana.send({ "fast.txt": "Hello" });
@@ -174,17 +265,19 @@ test("cron: en fil som har stått fast i over 30 minutter uten levende instans, 
   await finished(alive.id);
 });
 
-test("sletting midt i oversettelsen stopper Workflowen og rydder R2; cron tar resten av mellomlageret", async () => {
+test("sletting midt i oversettelsen stopper Workflowen og rydder mellomlageret; originalene og det som var ferdig, blir liggende for eieren", async () => {
   dev.xai.setMode("slow", 1500);
   const docx = fs.readFileSync(makeDocx(path.join(tmp, "slett.docx")));
   const sending = await svetlana.send({ "først.txt": "Hello", "slett.docx": docx });
   const fileId = sending.files.find((f) => f.name === "slett.docx").id;
+  const firstId = sending.files.find((f) => f.name === "først.txt").id;
   // Lang frist: lokalt hender det at runtimen avbryter et steg, og da venter Workflowen før nytt forsøk.
   await eventually(async () => (await dev.sql("SELECT COUNT(*) AS n FROM batches WHERE file_id = ?", fileId))[0].n >= 1,
     { timeoutMs: 45000, what: "første batch er ferdig" });
   assert.equal((await svetlana.del(`/api/sendings/${sending.id}`)).status, 204);
   const calls = dev.xai.state.calls;
-  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/`), []);
+  const kept = [`s/${sending.id}/${firstId}/original`, `s/${sending.id}/${firstId}/result`, `s/${sending.id}/${fileId}/original`].sort();
+  assert.deepEqual((await dev.r2Keys(`s/${sending.id}/`)).sort(), kept);
   assert.deepEqual(await dev.r2Keys(`work/${fileId}/`), []);
 
   await new Promise((r) => setTimeout(r, 2500));
@@ -192,7 +285,9 @@ test("sletting midt i oversettelsen stopper Workflowen og rydder R2; cron tar re
   const types = (await dev.sql("SELECT type FROM events WHERE sending_id = ? ORDER BY id", sending.id)).map((e) => e.type);
   assert.deepEqual(types.slice(types.indexOf("sending.deleted")), ["sending.deleted"], `ingenting skjer etter slettingen: ${types.join(", ")}`);
   assert.equal(types.filter((t) => t === "file.done").length, 1, "bare først.txt ble ferdig før slettingen");
-  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/`), [], "ingen resultat dukket opp etterpå");
+  assert.deepEqual((await dev.r2Keys(`s/${sending.id}/`)).sort(), kept, "ingen ny oversettelse dukket opp etterpå");
+  assert.equal((await admin.get(`/api/files/${firstId}/result`)).data.toString(), "NB:HELLO", "eieren kan laste ned det som ble ferdig");
+  assert.equal((await admin.get(`/api/files/${fileId}/result`)).status, 404, "slett.docx ble aldri ferdig");
   await dev.cron();
   assert.deepEqual(await dev.r2Keys("work/"), [], "cron rydder mellomlager for slettede og ferdige filer");
   dev.xai.setMode("upper");

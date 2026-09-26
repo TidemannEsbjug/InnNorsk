@@ -21,10 +21,13 @@ async function charsUsed(env, windowMs) {
   return (await one(env, `SELECT (${USED_SQL}) AS n`, isoAgo(windowMs))).n;
 }
 
+// Alt som fortsatt ligger i R2 (originaler og oversettelser), også det Svetlana har slettet, til cron sletter det for godt.
+const STORED_SQL = "SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE purged_at IS NULL";
+
 // { day, month, storage }: { used, cap } for admin-oversikten (tegn og byte).
 export async function quotaStatus(env) {
   const cfg = config(env);
-  const storage = await one(env, "SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE deleted_at IS NULL");
+  const storage = await one(env, STORED_SQL);
   return {
     day: { used: await charsUsed(env, DAY_MS), cap: cfg.maxCharsPerDay },
     month: { used: await charsUsed(env, MONTH_MS), cap: cfg.maxCharsPerMonth },
@@ -65,11 +68,12 @@ export async function reserveTranslation(env, chars, ctx, { admin = false } = {}
 // Gir tilbake en reservasjon når oversettelsen likevel ikke startet.
 export const releaseTranslation = (env, id) => run(env, "DELETE FROM quota_usage WHERE id = ?", id);
 
-// Kaster 507 hvis en ny fil på bytes byte ville gjøre at det samlet lagres mer enn MAX_STORAGE_GB (originaler og resultater).
+// Kaster 507 hvis en ny fil på bytes byte ville gjøre at det samlet lagres mer enn MAX_STORAGE_GB (originaler og resultater,
+// også slettede som ikke er slettet for godt ennå). Å slette sendinger frigjør derfor ikke plass før RETAIN_DELETED_DAYS er gått.
 export async function checkStorage(env, bytes, ctx) {
   const cap = Math.round(config(env).maxStorageGb * GB);
-  const { n: used } = await one(env, "SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE deleted_at IS NULL");
+  const { n: used } = await one(env, STORED_SQL);
   if (used + bytes <= cap) return;
   await logEvent(env, "warn", "quota.storage", "Lagringstaket er nådd", { usedBytes: used, requestedBytes: bytes, capBytes: cap }, ctx);
-  fail(507, `Lagringsplassen er full. Slett gamle sendinger under «Mine filer», eller si fra til ${await translatorName(env)}.`);
+  fail(507, `Lagringsplassen er full. Si fra til ${await translatorName(env)}.`);
 }

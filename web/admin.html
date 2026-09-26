@@ -59,6 +59,7 @@
         <p class="muted small estimator" id="estimator"></p>
       </article>
       <div class="stats" id="stats"></div>
+      <div class="activity-list" id="activity" hidden></div>
       <article class="card">
         <div class="card-head">
           <h2>Varsler på iPhone</h2>
@@ -73,9 +74,16 @@
       <div class="notice notice-error panel-error" role="alert" hidden></div>
       <div class="toolbar">
         <p class="muted small" id="sendings-count"></p>
-        <button type="button" class="btn btn-secondary btn-small" id="sendings-refresh">Oppdater</button>
+        <div class="toolbar-actions">
+          <label class="check small">
+            <input type="checkbox" id="sendings-deleted" checked />
+            <span>Vis også slettede</span>
+          </label>
+          <button type="button" class="btn btn-secondary btn-small" id="sendings-refresh">Oppdater</button>
+        </div>
       </div>
       <div id="sendings"></div>
+      <p class="center"><button type="button" class="btn btn-secondary btn-small" id="sendings-more" hidden>Vis flere</button></p>
       <input type="file" id="result-input" class="visually-hidden" tabindex="-1" aria-hidden="true" />
     </section>
 
@@ -86,9 +94,16 @@
           <span>Nivå</span>
           <select id="log-level">
             <option value="">Alle</option>
+            <option value="problems">Advarsler og feil</option>
             <option value="info">Info</option>
             <option value="warn">Advarsel</option>
             <option value="error">Feil</option>
+          </select>
+        </label>
+        <label class="field-inline">
+          <span>Bruker</span>
+          <select id="log-user">
+            <option value="">Alle</option>
           </select>
         </label>
         <label class="field-inline">
@@ -117,24 +132,46 @@
         <option value="auth."></option>
         <option value="file."></option>
         <option value="sending."></option>
+        <option value="download."></option>
+        <option value="client."></option>
+        <option value="quota."></option>
         <option value="admin."></option>
         <option value="push."></option>
         <option value="user."></option>
         <option value="auth.login"></option>
         <option value="auth.login_failed"></option>
+        <option value="auth.locked"></option>
+        <option value="auth.logout"></option>
+        <option value="auth.password_changed"></option>
         <option value="file.uploaded"></option>
+        <option value="file.rejected"></option>
+        <option value="file.replaced"></option>
+        <option value="file.removed"></option>
         <option value="file.started"></option>
         <option value="file.done"></option>
         <option value="file.warning"></option>
         <option value="file.failed"></option>
         <option value="file.status_changed"></option>
+        <option value="upload.failed"></option>
+        <option value="sending.created"></option>
+        <option value="sending.updated"></option>
         <option value="sending.sent"></option>
+        <option value="sending.start_failed"></option>
         <option value="sending.done"></option>
+        <option value="sending.reply"></option>
         <option value="sending.deleted"></option>
+        <option value="sending.purged"></option>
+        <option value="download.result"></option>
+        <option value="download.original"></option>
+        <option value="client.page"></option>
+        <option value="client.file_rejected"></option>
+        <option value="client.upload_failed"></option>
+        <option value="client.error_shown"></option>
+        <option value="client.error"></option>
         <option value="admin.test_api"></option>
         <option value="push.sent"></option>
         <option value="push.failed"></option>
-        <option value="client.error"></option>
+        <option value="session.revoked"></option>
         <option value="server.error"></option>
         <option value="retention.sweep"></option>
       </datalist>

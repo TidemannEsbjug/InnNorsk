@@ -16,7 +16,7 @@ GitHub Pages (`docs/index.html`) er bare nedlastingssiden for Windows-appen.
 3. Velg bokmål eller nynorsk og trykk **Oversett til norsk**. Du kan lukke siden; oversettelsen fortsetter.
 4. Last ned under **Mine filer** (`Rapport (norsk).docx`). Originalene endres ikke. Filene ligger der til du sletter dem.
 
-Støtte: `.docx` `.pptx` `.xlsx` `.pdf` `.txt` `.md` `.csv` `.html` `.rtf` (maks 25 MB per fil). PDF blir PDF med samme oppsett (tekst byttes på stedet, grafikk beholdes); RTF blir Word. Skannet PDF uten tekstlag går ikke.
+Støtte: `.docx` `.pptx` `.xlsx` `.pdf` `.txt` `.md` `.csv` `.html` `.rtf` (maks 25 MB per fil). PDF blir PDF med samme oppsett (tekst byttes på stedet, grafikk beholdes); RTF blir RTF med samme skrift, tabeller, lenker og bilder. Skannet PDF uten tekstlag går ikke.
 
 ## Arkitektur
 
@@ -24,7 +24,7 @@ Støtte: `.docx` `.pptx` `.xlsx` `.pdf` `.txt` `.md` `.csv` `.html` `.rtf` (maks
 Nettleser ──► Cloudflare Worker (worker/) ──► D1 (brukere, økter, sendinger, logg, grok_calls)
                     │                     └──► R2 (originaler, oversettelser, mellomlager per batch)
                     └── Workflow TranslateSending ──► xAI Responses API (src/grok.js)
-                                   └── formatkjernen src/core.js (docx/pptx/xlsx/pdf/tekst)
+                                   └── formatkjernen src/core.js (docx/pptx/xlsx/pdf/rtf/tekst)
 ```
 
 Mer: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [docs/PRODUCT.md](docs/PRODUCT.md) · [CLAUDE.md](CLAUDE.md)

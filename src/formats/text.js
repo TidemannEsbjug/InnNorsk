@@ -1,14 +1,4 @@
 const { translateDocumentText, translateStrings } = require("../grok");
-const { buildSimpleDocx } = require("./simple-docx");
-
-function stripRtf(rtf) {
-  return String(rtf)
-    .replace(/\{\*?\\[^{}]+}|[{}]|\\[A-Za-z]+\n?(?:-?\d+)?[ ]?/g, "")
-    .replace(/\\'[0-9a-fA-F]{2}/g, "")
-    .replace(/\r/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
 
 async function translatePlain(buffer, ctx) {
   const text = buffer.toString("utf8");
@@ -87,16 +77,8 @@ async function translateHtml(buffer, ctx) {
   return Buffer.from(out, "utf8");
 }
 
-async function translateRtfToDocx(buffer, ctx) {
-  const text = stripRtf(buffer.toString("utf8"));
-  const translated = await translateDocumentText({ ...ctx, text });
-  const paragraphs = translated.replace(/\r\n/g, "\n").split("\n");
-  return buildSimpleDocx(paragraphs.length ? paragraphs : [translated], { compact: true });
-}
-
 module.exports = {
   translatePlain,
   translateCsv,
   translateHtml,
-  translateRtfToDocx,
 };

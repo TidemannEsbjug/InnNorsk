@@ -32,6 +32,55 @@ async function validateOoxml(buffer) {
   return errors;
 }
 
+// RTF: må starte med {\rtf, ha balanserte krøllparenteser og bare mellomrom/NUL etter rotgruppen.
+// \{ \} og rådata etter \binN teller ikke (samme regel som formats/rtf.js). Leser bytene direkte.
+const RTF_TAIL = new Set([0x00, 0x09, 0x0a, 0x0c, 0x0d, 0x1a, 0x20]);
+const isDigit = (c) => c >= 0x30 && c <= 0x39;
+
+function validateRtf(buffer) {
+  const bytes = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  const n = bytes.length;
+  const errors = [];
+  if (!/^(?:\xEF\xBB\xBF)?\s*\{\\rtf/.test(bytes.toString("latin1", 0, Math.min(64, n)))) {
+    errors.push("Mangler RTF-hode ({\\rtf)");
+  }
+  let depth = 0;
+  let i = 0;
+  while (i < n) {
+    const c = bytes[i];
+    if (c === 0x5c) {
+      // \binN (+ ett mellomrom): N byte rådata som ikke leses
+      if (bytes[i + 1] === 0x62 && bytes[i + 2] === 0x69 && bytes[i + 3] === 0x6e && isDigit(bytes[i + 4])) {
+        let j = i + 4;
+        let len = 0;
+        while (j < n && isDigit(bytes[j])) len = len * 10 + bytes[j++] - 0x30;
+        if (j < n && bytes[j] === 0x20) j++;
+        i = j + len;
+      } else i += 2;
+      continue;
+    }
+    if (c === 0x7b) depth++;
+    else if (c === 0x7d) {
+      if (depth === 0) {
+        errors.push(`For mange } (posisjon ${i})`);
+        break;
+      }
+      if (--depth === 0) {
+        for (let x = i + 1; x < n; x++) {
+          if (!RTF_TAIL.has(bytes[x])) {
+            errors.push(bytes[x] === 0x7d ? `For mange } (posisjon ${x})` : `Innhold etter slutten av dokumentet (posisjon ${x})`);
+            break;
+          }
+        }
+        return errors;
+      }
+    }
+    i++;
+  }
+  if (depth > 0) errors.push(`${depth} gruppe(r) mangler }`);
+  return errors;
+}
+
 async function validateOutput(buffer, outExt) {
   const ext = String(outExt || "").toLowerCase();
   let errors = [];
@@ -44,6 +93,8 @@ async function validateOutput(buffer, outExt) {
     const tail = Buffer.from(buffer.subarray(Math.max(0, buffer.length - 1024))).toString("latin1");
     if (!head.includes("%PDF-")) errors.push("Mangler PDF-hode (%PDF-)");
     if (!tail.includes("%%EOF")) errors.push("Mangler PDF-slutt (%%EOF)");
+  } else if (ext === ".rtf") {
+    errors = validateRtf(buffer);
   }
   return { ok: errors.length === 0, errors };
 }

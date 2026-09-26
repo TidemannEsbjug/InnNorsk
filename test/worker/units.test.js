@@ -70,6 +70,33 @@ test("statustekstene Svetlana ser", async () => {
     "Denne PDF-en er et bilde uten tekst og kan ikke oversettes.", "vennlig forklaring fra analysen");
 });
 
+test("slettede filer: admin ser når og hvorfor, og når de slettes for godt; hun ser ingenting nytt", async () => {
+  const { serializeFile } = await load("sendings.js");
+  const f = {
+    id: "f1", sending_id: "s1", rel_path: "Mappe/brev.txt", name: "brev.txt", ext: ".txt", bytes: 5, status: "done",
+    output_name: "brev (norsk).txt", output_bytes: 9, deleted_at: "2026-09-01T10:00:00.000Z", deleted_reason: "sending", purged_at: null,
+  };
+  const admin = serializeFile(f, "Jonas", true, 30);
+  assert.deepEqual([admin.deletedAt, admin.deletedReason, admin.purgedAt, admin.purgeAt],
+    ["2026-09-01T10:00:00.000Z", "sending", null, "2026-10-01T10:00:00.000Z"]);
+  const purged = serializeFile({ ...f, purged_at: "2026-10-01T10:15:00.000Z" }, "Jonas", true, 30);
+  assert.deepEqual([purged.purgedAt, purged.purgeAt], ["2026-10-01T10:15:00.000Z", null]);
+  assert.equal(serializeFile({ ...f, deleted_at: null, deleted_reason: null }, "Jonas", true, 30).purgeAt, null);
+  const hers = serializeFile(f, "Jonas");
+  for (const key of ["deletedAt", "deletedReason", "purgedAt", "purgeAt", "error", "outputSource"]) assert.equal(key in hers, false, key);
+});
+
+test("klientloggen: bare kjente typer, og data fra nettleseren er et lite objekt (for stort → bare starten)", async () => {
+  const { clientData, ACTIVITY } = await load("routes/clientlog.js");
+  assert.deepEqual(Object.keys(ACTIVITY).sort(), ["client.error_shown", "client.file_rejected", "client.page", "client.upload_failed"]);
+  assert.deepEqual(clientData({ name: "brev.docx", size: 12 }), { name: "brev.docx", size: 12 });
+  for (const bad of [null, undefined, "tekst", [1, 2], 5]) assert.deepEqual(clientData(bad), {});
+  const big = clientData({ text: "x".repeat(5000) });
+  assert.equal(big.truncated, true);
+  assert.equal(big.preview.length, 4000);
+  assert.ok(big.preview.startsWith('{"text":"xxx'));
+});
+
 test("estimatet: standardmodell, tilpasning fra Grok-kall, steg à 4 batcher og live-justering", async () => {
   const { fitParams, predictFile, predictSending, liveEta, makespan, DEFAULT_PARAMS } = await load("estimate.js");
   assert.deepEqual(fitParams([]), { a: 8, b: 0.006, samples: 0, source: "default" });
@@ -124,6 +151,9 @@ test("konfig: modell, samtidighet og priser (tom pris = ukjent)", async () => {
   assert.deepEqual([empty.model, empty.concurrency, empty.priceInputPerM, empty.priceOutputPerM], ["grok-4.6", 2, null, null]);
   const set = config({ XAI_MODEL: "grok-x", GROK_CONCURRENCY: "3", XAI_PRICE_INPUT_PER_M: "0.2", XAI_PRICE_OUTPUT_PER_M: "0" });
   assert.deepEqual([set.model, set.concurrency, set.priceInputPerM, set.priceOutputPerM], ["grok-x", 3, 0.2, 0]);
+  assert.equal(empty.retainDeletedDays, 30, "slettede filer beholdes 30 dager som standard");
+  assert.equal(config({ RETAIN_DELETED_DAYS: "7" }).retainDeletedDays, 7);
+  assert.equal(config({ RETAIN_DELETED_DAYS: "0" }).retainDeletedDays, 30, "0 eller tull gir standardverdien");
   const { costUsd } = await load("xai.js");
   assert.equal(costUsd({ XAI_PRICE_INPUT_PER_M: "2", XAI_PRICE_OUTPUT_PER_M: "10" }, 1500, 300), 0.006);
   assert.equal(costUsd({ XAI_PRICE_INPUT_PER_M: "2" }, 1500, 300), null);

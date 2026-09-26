@@ -5,6 +5,9 @@ const LANGUAGE_LABEL = {
 
 const MAX_BATCH_CHARS = 7000;
 const MAX_BATCH_ITEMS = 28;
+// Korte strenger (tabellceller, etiketter): flere per kall, så ikke hvert kall går med til å gjenta instruksjonene.
+const SHORT_BATCH_ITEMS = 80;
+const SHORT_BATCH_CHARS = 1500;
 const MAX_ATTEMPTS = 4;
 const DEFAULT_TIMEOUT_MS = 240000;
 
@@ -280,6 +283,7 @@ function batchPrompt(label, payload) {
     "Direkte oversettelse. Ikke omskriv, ikke forkort, ikke utvid, og ikke endre typografi.",
     "Ikke slå sammen avsnitt eller linjer. Ikke legg til markdown, punktlister eller overskrifter som ikke finnes i kilden.",
     "Behold tall, egennavn, e-postadresser, URL-er, koder og markup uendret når de ikke er vanlig språk.",
+    "Merkene ⟦1⟧…⟦/1⟧ (også ⟦2⟧ osv., samme nummer kan komme flere ganger) markerer tekst med egen formatering eller plassering: behold alle merkene uendret, rundt de tilsvarende oversatte ordene.",
     "Ikke legg til forklaringer. Ikke hopp over elementer.",
     `Returner KUN et JSON-array med nøyaktig ${payload.length} strenger, i samme rekkefølge.`,
     "",
@@ -292,6 +296,7 @@ function singlePrompt(label, text) {
     `Du er en profesjonell oversetter til ${label}.`,
     "Oversett teksten under til naturlig, idiomatisk norsk. Direkte oversettelse.",
     "Behold linjeskift, tabulatorer og innrykk nøyaktig. Behold tall, egennavn, URL-er og koder.",
+    "Merkene ⟦1⟧…⟦/1⟧ (også ⟦2⟧ osv., samme nummer kan komme flere ganger) markerer tekst med egen formatering eller plassering: behold alle merkene uendret, rundt de tilsvarende oversatte ordene.",
     "Returner KUN den oversatte teksten, uten anførselstegn, forklaringer eller markdown.",
     "",
     text,
@@ -355,7 +360,8 @@ function planBatches(strings) {
     const t = String(s ?? "");
     if (!t.trim()) return;
     const extra = t.length + 8;
-    if (current.length && (chars + extra > MAX_BATCH_CHARS || current.length >= MAX_BATCH_ITEMS)) {
+    const full = current.length >= MAX_BATCH_ITEMS && (current.length >= SHORT_BATCH_ITEMS || chars + extra > SHORT_BATCH_CHARS);
+    if (current.length && (chars + extra > MAX_BATCH_CHARS || full)) {
       batches.push(current);
       current = [];
       chars = 0;

@@ -8,6 +8,7 @@
 //   fail401   alle kall svarer 401
 //   fail403   alle kall svarer 403 { error: "string" } (som en voice-nøkkel)
 //   slow      som upper, men venter opts.delayMs (standard 200 ms)
+//   spacedmarks som upper, men merkene skrives med mellomrom inni: ⟦ 1 ⟧…⟦ /1 ⟧ (slik en modell kan gjøre)
 // respond() lager svaret og brukes også av den falske HTTP-serveren (mock-xai-server.js).
 const realFetch = global.fetch;
 const state = { mode: "upper", delayMs: 200, calls: 0, strings: 0, chars: 0, requests: [] };
@@ -64,6 +65,7 @@ function respond(st, body) {
     st.chars += arr.reduce((acc, s) => acc + String(s).length, 0);
     let out = arr.map(transform);
     if (mode === "mismatch" && out.length > 1 && n % 2 === 1) out = out.slice(0, -1);
+    if (mode === "spacedmarks") out = out.map((s) => s.replace(/⟦(\/?)(\d+)⟧/g, "⟦ $1$2 ⟧"));
     text = JSON.stringify(out);
   }
   return reply(200, {

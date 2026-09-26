@@ -2074,6 +2074,122 @@ pre {
   margin-top: 4px;
 }
 
+.ev-label {
+  font-weight: 700;
+  color: var(--violet-ink);
+}
+
+/* Aktivitet per bruker (Oversikt), slettede sendinger og historikken per sending (Sendinger). */
+
+.activity-list {
+  display: grid;
+  gap: 14px;
+}
+
+.activity {
+  display: grid;
+  gap: 14px;
+}
+
+.activity .card-head {
+  margin-bottom: 0;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.problems {
+  display: grid;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: #fef6f5;
+  border: 1px solid var(--error-line);
+}
+
+.problem-list,
+.timeline-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.lvl-line {
+  padding-left: 10px;
+  border-left: 3px solid var(--success-line);
+  overflow-wrap: anywhere;
+}
+
+.lvl-line-warn {
+  border-left-color: var(--warn);
+}
+
+.lvl-line-error {
+  border-left-color: var(--error);
+}
+
+.lvl-line time {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+
+.acard.is-deleted {
+  background: var(--surface-2);
+  border-style: dashed;
+  border-color: var(--line-strong);
+}
+
+.deleted-note {
+  display: grid;
+  gap: 4px;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+}
+
+.deleted-note .btn-quiet,
+.acard > p .btn-quiet {
+  padding: 2px 8px;
+  font-size: 14px;
+  color: var(--error-ink);
+}
+
+.afile.is-removed .afile-name {
+  color: var(--ink-soft);
+  text-decoration: line-through;
+  text-decoration-color: var(--line-input);
+}
+
+.purged {
+  padding: 6px 10px;
+}
+
+.timeline-body {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tl {
+  display: grid;
+  grid-template-columns: minmax(118px, auto) minmax(64px, auto) 1fr;
+  gap: 2px 10px;
+}
+
+.tl-who {
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+
 .grid-2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2362,6 +2478,14 @@ pre {
 
   .acard-head {
     flex-direction: column;
+  }
+
+  .tl {
+    grid-template-columns: auto 1fr;
+  }
+
+  .tl-msg {
+    grid-column: 1 / -1;
   }
 
   .xai .facts {

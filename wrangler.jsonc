@@ -10,6 +10,8 @@
 // XAI_PRICE_INPUT_PER_M / XAI_PRICE_OUTPUT_PER_M: USD per million tokens. Tomme = kostnaden er ukjent, admin viser bare tokens.
 // Tak mot uventet forbruk (lekket passord eller en feil): MAX_CHARS_PER_DAY / MAX_CHARS_PER_MONTH = tegn som kan sendes til
 // oversettelse per døgn / 30 dager (ca. 2500 tegn per side), MAX_STORAGE_GB = samlet lagring i R2 (gratis opp til 10 GB).
+// RETAIN_DELETED_DAYS: filer Svetlana sletter, blir borte for henne med én gang, men eieren kan laste dem ned i så mange
+// dager før cron sletter dem for godt (de teller med i MAX_STORAGE_GB så lenge de ligger der).
 // Hemmeligheter står aldri her. Lokalt: kopier .dev.vars.example til .dev.vars (committes aldri).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
@@ -32,6 +34,7 @@
     "MAX_CHARS_PER_DAY": "300000",
     "MAX_CHARS_PER_MONTH": "2000000",
     "MAX_STORAGE_GB": "5",
+    "RETAIN_DELETED_DAYS": "30",
     "XAI_MODEL": "grok-4.20-0309-non-reasoning",
     "GROK_CONCURRENCY": "2",
     "XAI_PRICE_INPUT_PER_M": "1.25",

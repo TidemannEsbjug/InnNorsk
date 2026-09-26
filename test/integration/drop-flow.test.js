@@ -191,7 +191,8 @@ test("Jonas ser forløpet i loggen, hvert Grok-kall med tokens, og kostnaden per
     assert.ok(found.every((e) => e.source === source), `${type} har kilde ${source}`);
   }
   const [sent] = await events("sending.sent", ofSending);
-  assert.deepEqual([sent.username, sent.message, sent.data.files, sent.data.skipped, sent.data.note], ["svetlana", "Svetlana sendte 2 filer", 2, 1, true]);
+  assert.deepEqual([sent.username, sent.message, sent.data.files, sent.data.skipped, sent.data.note],
+    ["svetlana", "Svetlana sendte 2 filer", 2, 1, "Hei Jonas! Søknaden haster litt."], "meldingen hennes står i loggen");
   const [pdf] = await events("file.uploaded", (e) => e.fileId === ids.pdf);
   assert.equal(pdf.level, "warn");
 

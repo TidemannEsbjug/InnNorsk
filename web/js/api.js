@@ -382,6 +382,49 @@ export async function logout() {
   location.href = "/login";
 }
 
+// "Safari på iPhone", "Chrome på Windows", "InnNorsk Varsel (iPhone)".
+export function describeAgent(ua = "") {
+  if (/CFNetwork|InnNorsk/i.test(ua)) return "InnNorsk Varsel (iPhone)";
+  const os = /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Android/.test(ua) ? "Android"
+    : /Windows/.test(ua) ? "Windows" : /Mac OS X/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "";
+  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome"
+    : /Safari\//.test(ua) ? "Safari" : "";
+  return [browser, os].filter(Boolean).join(" på ") || ua.slice(0, 60) || "Ukjent nettleser";
+}
+
+// Det som skjer i nettleseren og som serveren ellers aldri ser (filer som ikke ble tatt med, opplastinger som feilet,
+// feilmeldinger), til eierens logg. type: client.page | client.file_rejected | client.upload_failed | client.error_shown.
+// Aldri filinnhold eller passord. Går i bakgrunnen, stopper aldri siden, maks 20 i minuttet.
+const tracked = [];
+export function track(type, message, data, { sendingId, level } = {}) {
+  const now = Date.now();
+  while (tracked.length && now - tracked[0] > 60000) tracked.shift();
+  if (tracked.length >= 20) return;
+  tracked.push(now);
+  fetch("/api/client-log", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-InnNorsk": "1" },
+    body: JSON.stringify({ type, level, message: String(message || "").slice(0, 500), data, sendingId, url: location.pathname + location.hash }),
+    credentials: "same-origin",
+    keepalive: true,
+  }).catch(() => {});
+}
+
+// Én gang per sidevisning: hvilken side, skjermstørrelse og nettleser (så eieren kan hjelpe med «hos meg ser det sånn ut»).
+export function trackPage() {
+  const browser = describeAgent(navigator.userAgent);
+  const viewport = `${innerWidth}×${innerHeight}`;
+  track("client.page", `Åpnet ${location.pathname} · ${browser} · ${viewport}`, {
+    page: location.pathname + location.hash,
+    viewport,
+    screen: `${screen.width}×${screen.height}`,
+    pixelRatio: devicePixelRatio,
+    browser,
+    touch: matchMedia("(pointer: coarse)").matches,
+    language: navigator.language,
+  });
+}
+
 // Sender uventede JavaScript-feil til serverloggen, maks 5 i minuttet.
 export function reportErrors() {
   const sent = [];

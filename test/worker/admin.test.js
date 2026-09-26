@@ -84,7 +84,7 @@ test("oversikt: xAI-forbruk siste døgn, tellere, lagring, enheter, brukere og e
   assert.deepEqual(t.tokens24h, tokens);
   assert.deepEqual(data.counts, { waiting: 0, working: 0, doneToday: 2, failed: 0 });
   const outputs = (await dev.sql("SELECT SUM(output_bytes) AS n FROM files"))[0].n;
-  assert.deepEqual(data.storage, { files: 4, bytes: 11 + outputs });
+  assert.deepEqual(data.storage, { files: 4, bytes: 11 + outputs, deletedFiles: 0, deletedBytes: 0, retainDays: 30 });
   assert.deepEqual(data.devices.map((d) => d.token), [PHONE]);
   assert.equal(data.users, 2);
   assert.deepEqual(data.estimator, before.estimator, "under 8 kall: standardmodellen (og bufret i 60 s)");
@@ -223,6 +223,48 @@ test("logg: filtrer på nivå, type (prefiks), kilde og tekst, og bla bakover", 
   for (const key of ["id", "ts", "level", "type", "message", "source", "userId", "username", "sessionId", "sendingId", "fileId", "ip", "data"]) {
     assert.ok(key in sample, key);
   }
+});
+
+test("aktivitet for Svetlana i Oversikt: sist innom, opplasting, sending, nedlasting, siste 7 dager og problemer siste døgn", async () => {
+  const sending = await svetlana.send({ "aktiv.txt": "Hello" });
+  const file = await until(sending.files[0].id, "done");
+  assert.equal((await svetlana.get(`/api/files/${file.id}/result`)).status, 200);
+  assert.equal((await admin.get(`/api/files/${file.id}/original`)).status, 200, "eierens egne nedlastinger teller ikke som hennes");
+  const shown = "Feilmelding vist ved sending: «Noe gikk galt på serveren. Feilen er logget.»";
+  assert.equal((await svetlana.post("/api/client-log", { type: "client.error_shown", message: shown, sendingId: sending.id, data: { where: "send" } })).status, 204);
+
+  const { data } = await admin.get("/api/admin/overview");
+  assert.deepEqual(data.activity.map((a) => a.username), ["svetlana"], "bare brukere som sender filer");
+  const a = data.activity[0];
+  const [me] = await dev.sql("SELECT id FROM users WHERE username = 'svetlana'");
+  assert.deepEqual([a.userId, a.displayName, a.disabled], [me.id, "Svetlana", false]);
+  for (const key of ["lastSeenAt", "lastLoginAt", "lastUploadAt", "lastSentAt", "lastDownloadAt"]) {
+    assert.ok(Date.now() - Date.parse(a[key]) < 10 * 60000, `${key}: ${a[key]}`);
+  }
+  const [download] = await dev.sql("SELECT ts FROM events WHERE type = 'download.result' AND user_id = ? ORDER BY id DESC LIMIT 1", me.id);
+  assert.equal(a.lastDownloadAt, download.ts);
+  const [week] = await dev.sql("SELECT COUNT(*) AS n FROM sendings WHERE user_id = ? AND sent_at IS NOT NULL", me.id);
+  assert.equal(a.week.sendings, week.n);
+  assert.ok(a.week.files >= a.week.sendings && a.week.done >= 1, JSON.stringify(a.week));
+  assert.equal(a.problems24h.errorsShown, 1);
+  assert.ok(a.problems24h.total >= 2, "også den uleselige filen hun lastet opp");
+  assert.deepEqual([a.problems24h.recent[0].type, a.problems24h.recent[0].message, a.problems24h.recent[0].sendingId],
+    ["client.error_shown", shown, sending.id]);
+  assert.ok(a.problems24h.recent.length <= 5);
+
+  // «Vis loggen»: det hun gjorde, og det Workflowen gjorde med sendingene hennes, men ikke eierens egne handlinger.
+  const events = async (q) => (await admin.get(`/api/admin/events?userId=${a.userId}&limit=500&${q}`)).data.events;
+  const hers = await events("");
+  assert.ok(hers.some((e) => e.type === "file.done" && e.userId === null && e.sendingId === sending.id), "Workflowens hendelser");
+  assert.ok(hers.some((e) => e.type === "auth.login" && e.username === "svetlana"));
+  assert.ok(hers.every((e) => e.userId === a.userId || e.userId === null));
+  assert.ok(!hers.some((e) => e.username === "eier"), "ikke eierens nedlastinger eller «Sett i kø igjen»");
+  const problems = await events("level=problems");
+  assert.ok(problems.length >= 2 && problems.every((e) => ["warn", "error"].includes(e.level)));
+
+  // Brukere: sist aktiv.
+  const users = (await admin.get("/api/admin/users")).data.users;
+  assert.ok(Date.now() - Date.parse(users.find((u) => u.username === "svetlana").lastSeenAt) < 10 * 60000);
 });
 
 test("økter: list og avslutt en bestemt økt", async () => {

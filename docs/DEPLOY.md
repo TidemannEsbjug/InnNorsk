@@ -15,9 +15,10 @@ Cloudflare har **ingen hard utgiftsgrense** på Workers Paid; alt over det inklu
 |---|---|---|
 | `MAX_CHARS_PER_DAY` | 300000 | tegn som kan sendes til oversettelse siste 24 t (ca. 120 sider) |
 | `MAX_CHARS_PER_MONTH` | 2000000 | tegn siste 30 dager (ca. 800 sider) |
-| `MAX_STORAGE_GB` | 5 | samlet lagring (originaler + oversettelser), godt under R2-gratiskvoten på 10 GB |
+| `MAX_STORAGE_GB` | 5 | samlet lagring (originaler + oversettelser, også slettede som ikke er slettet for godt ennå), godt under R2-gratiskvoten på 10 GB |
+| `RETAIN_DELETED_DAYS` | 30 | hvor lenge du kan laste ned filer Svetlana har slettet, før cron sletter dem for godt |
 
-Også «Sett i kø igjen» teller, og sletting gir ikke kvoten tilbake. Når et tak nås, får Svetlana en vennlig melding, og hendelsen `quota.*` havner i Admin → Logg. Forbruket mot takene vises i Admin → Oversikt.
+Også «Sett i kø igjen» teller, og sletting gir ikke kvoten tilbake. Plass i lagringen kommer først tilbake når slettede filer er slettet for godt (etter `RETAIN_DELETED_DAYS`, eller med «Slett for godt nå» i Admin → Sendinger). Når et tak nås, får Svetlana en vennlig melding, og hendelsen `quota.*` havner i Admin → Logg. Forbruket mot takene vises i Admin → Oversikt.
 
 I tillegg (gjøres i nettleseren):
 - **Cloudflare:** Manage Account → Notifications → Add → **Usage Based Billing** → e-post når bruken av Workers/R2/D1 passerer en terskel.
@@ -58,9 +59,11 @@ Se [ios/README.md](../ios/README.md). Kort: lag en APNs-nøkkel (.p8) i Apple De
 
 ## Daglig drift
 
-- **Admin → Sendinger:** alle filer (original og oversettelse), status, feil med tekniske detaljer, Grok-kall, tokens, kostnad, estimat vs faktisk tid. «Sett i kø igjen» oversetter på nytt. «Last opp oversettelse» lar deg legge inn en fil manuelt. «Hilsen til Svetlana» vises for henne.
-- **Admin → Logg:** alle hendelser (innlogging, opplasting, oversettelse, nedlasting, feil i nettleseren).
-- **Admin → Økter / Brukere:** se og logg ut økter; nytt passord til Svetlana (vises én gang), eller kjør `make-user` på nytt.
+- **Admin → Oversikt:** et aktivitetskort per bruker som sender filer: om siden er åpen nå / sist innom, sist innlogget, sist lastet opp, sendt og lastet ned, siste 7 dager, og problemer siste døgn (filer som feilet, feilmeldinger hun fikk se, opplastinger som ikke gikk). «Vis loggen» / «Vis problemer» åpner Logg filtrert på henne.
+- **Admin → Sendinger:** alle filer (original og oversettelse), status, det hun ser ved filen, feil med tekniske detaljer, Grok-kall, tokens, kostnad, estimat vs faktisk tid, og «Historikk» per sending (opprettet, filer lastet opp eller avvist, sendt, oversatt, lastet ned, slettet – med hvem). «Sett i kø igjen» oversetter på nytt. «Last opp oversettelse» lar deg legge inn en fil manuelt. «Hilsen til Svetlana» vises for henne.
+- **Når Svetlana sletter:** sendingen (eller en fil hun fjerner fra utkastet, eller laster opp på nytt med samme navn) forsvinner for henne med én gang, og en oversettelse som pågår, stoppes. Filene blir liggende i R2: med «Vis også slettede» (på som standard) ser du dem merket «Slettet av Svetlana <dato>» og kan laste ned original og oversettelse i `RETAIN_DELETED_DAYS` dager. Deretter sletter cron dem for godt (`sending.purged` i loggen); kortet blir stående som historikk. «Slett for godt nå» gjør det med én gang. Utkast som aldri ble sendt, ryddes på samme måte etter to døgn. Slettede sendinger kan ikke settes i kø igjen eller få manuell oversettelse.
+- **Admin → Logg:** alle hendelser (innlogging, opplasting, oversettelse, nedlasting, sletting, feil). Filter på bruker (det hun gjorde + det systemet gjorde med sendingene hennes) og «Advarsler og feil». Fra nettsiden hennes kommer også `client.page` (siden åpnet, med nettleser og skjermstørrelse), `client.file_rejected` (filer nettleseren ikke tok med, med grunnen hun så), `client.upload_failed` og `client.error_shown` (feilmeldingen ordrett) – aldri filinnhold eller passord.
+- **Admin → Økter / Brukere:** se og logg ut økter; «Sist aktiv» og «Vis aktivitet» per bruker; nytt passord til Svetlana (vises én gang), eller kjør `make-user` på nytt.
 - **Cloudflare-dashbordet:** Workers → oversetter → Logs, og Workflows → oversetter-translate for hver oversettelse. `npx wrangler tail` gir live-logg.
 - **Oppdatering:** `git pull && npm install && npm run deploy`.
 
@@ -78,4 +81,4 @@ Se [ios/README.md](../ios/README.md). Kort: lag en APNs-nøkkel (.p8) i Apple De
 ## Sikkerhetskopi
 
 - D1 har Time Travel (gjenoppretting 30 dager bakover): `npx wrangler d1 time-travel info innnorsk`.
-- Filene ligger i R2-bøtta `innnorsk-files` og slettes bare når Svetlana sletter en sending.
+- Filene ligger i R2-bøtta `innnorsk-files`. Det Svetlana sletter, slettes for godt `RETAIN_DELETED_DAYS` dager senere (eller når du trykker «Slett for godt nå»).

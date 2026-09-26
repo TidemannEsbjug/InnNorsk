@@ -20,6 +20,7 @@ export function config(env) {
     maxCharsPerDay: Math.floor(num(env, "MAX_CHARS_PER_DAY", 300000)),
     maxCharsPerMonth: Math.floor(num(env, "MAX_CHARS_PER_MONTH", 2000000)),
     maxStorageGb: num(env, "MAX_STORAGE_GB", 5),
+    retainDeletedDays: num(env, "RETAIN_DELETED_DAYS", 30),
     model: env.XAI_MODEL || "grok-4.6",
     concurrency: Math.floor(num(env, "GROK_CONCURRENCY", 2)),
     priceInputPerM: price(env, "XAI_PRICE_INPUT_PER_M"),

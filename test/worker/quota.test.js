@@ -1,5 +1,6 @@
 // Tak mot uventet forbruk, mot ekte wrangler dev med en falsk xAI: tekst til oversettelse per døgn og per 30 dager
-// (også «Sett i kø igjen»), at sletting ikke frigjør kvote, lagringstaket ved opplasting, admin-oversikten og cron.
+// (også «Sett i kø igjen»), at sletting ikke frigjør kvote, lagringstaket ved opplasting (slettede filer teller til cron
+// har slettet dem for godt), admin-oversikten og cron.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const workerDev = require("../helpers/worker-dev");
@@ -116,18 +117,28 @@ test("cron fjerner forbruk eldre enn 31 dager", async () => {
   assert.equal(await used(), 0);
 });
 
-test("lagringstaket: opplasting som ville gå over, avvises; sletting gir plassen tilbake", async () => {
+test("lagringstaket: opplasting som ville gå over, avvises; slettede filer teller til de er slettet for godt", async () => {
   const sending = await svetlana.newSending();
-  const [{ n: before }] = await dev.sql("SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE deleted_at IS NULL");
+  // Alt som ligger i R2, også den ferdige sendingen hun slettet over (den er ikke slettet for godt ennå).
+  const [{ n: before }] = await dev.sql("SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE purged_at IS NULL");
+  const [{ n: deleted }] = await dev.sql("SELECT COUNT(*) AS n FROM files WHERE deleted_at IS NOT NULL AND purged_at IS NULL");
+  assert.ok(deleted >= 1, "den slettede sendingen ligger der fortsatt");
+  assert.equal((await admin.get("/api/admin/overview")).data.limits.storage.used, before);
   const room = Math.round(STORAGE_GB * 1024 ** 3) - before;
   const half = Buffer.alloc(Math.ceil(room / 2) + 10, "a");
   assert.equal((await svetlana.upload(sending.id, "første.txt", half)).status, 201);
   const res = await svetlana.upload(sending.id, "andre.txt", half);
   assert.equal(res.status, 507);
-  assert.equal(res.data.error, "Lagringsplassen er full. Slett gamle sendinger under «Mine filer», eller si fra til Jonas.");
+  assert.equal(res.data.error, "Lagringsplassen er full. Si fra til Jonas.");
   assert.equal(JSON.parse((await lastEvent("quota.storage")).data_json).requestedBytes, half.length);
 
+  // Å slette gir ikke plass med én gang: eieren kan fortsatt laste filen ned.
   assert.equal((await svetlana.del(`/api/sendings/${sending.id}`)).status, 204);
   const again = await svetlana.newSending();
+  assert.equal((await svetlana.upload(again.id, "andre.txt", half)).status, 507);
+  // Når RETAIN_DELETED_DAYS er gått, sletter cron den for godt, og da er det plass.
+  await dev.sql("UPDATE files SET deleted_at = ? WHERE sending_id = ?", new Date(Date.now() - 31 * 86400000).toISOString(), sending.id);
+  await dev.cron();
+  assert.deepEqual(await dev.r2Keys(`s/${sending.id}/`), []);
   assert.equal((await svetlana.upload(again.id, "andre.txt", half)).status, 201);
 });

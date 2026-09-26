@@ -4,14 +4,10 @@ const { translateDocxBuffer } = require("./formats/docx");
 const { translatePptxBuffer } = require("./formats/pptx");
 const { translateXlsxBuffer } = require("./formats/xlsx");
 const { translatePdf } = require("./formats/pdf");
+const { translateRtf } = require("./formats/rtf");
 const { validateOutput } = require("./validate");
 const { planBatches } = require("./grok");
-const {
-  translatePlain,
-  translateCsv,
-  translateHtml,
-  translateRtfToDocx,
-} = require("./formats/text");
+const { translatePlain, translateCsv, translateHtml } = require("./formats/text");
 
 const HANDLERS = {
   ".docx": { outExt: ".docx", run: (buf, ctx) => translateDocxBuffer(buf, ctx) },
@@ -23,7 +19,7 @@ const HANDLERS = {
   ".csv": { outExt: ".csv", run: (buf, ctx) => translateCsv(buf, ctx) },
   ".html": { outExt: ".html", run: (buf, ctx) => translateHtml(buf, ctx) },
   ".htm": { outExt: ".html", run: (buf, ctx) => translateHtml(buf, ctx) },
-  ".rtf": { outExt: ".docx", run: (buf, ctx) => translateRtfToDocx(buf, ctx) },
+  ".rtf": { outExt: ".rtf", run: (buf, ctx) => translateRtf(buf, ctx) },
 };
 
 const SUPPORTED = Object.keys(HANDLERS);
@@ -141,7 +137,9 @@ async function analyzeBuffer(buffer, ext) {
 async function applyTranslations(buffer, ext, translatedCalls, ctx = {}) {
   const handler = handlerFor(ext);
   const { warnings, onWarning } = warningSink(ctx);
-  const apply = translatedCalls.map((c) => c.slice());
+  // Bare den ytre listen kopieres (translateStrings tar ett kall om gangen fra den); listene inni endres aldri, og en
+  // kopi av dem ville koste 8 byte per tekstbit ekstra i minnet.
+  const apply = translatedCalls.slice();
   const output = await handler.run(buffer, { ...ctx, apply, apiKey: "", onWarning });
   if (apply.length) throw new Error("Dokumentet endret seg under oversettelsen. Prøv igjen.");
   return { buffer: await validated(output, handler.outExt), outExt: handler.outExt, warnings };

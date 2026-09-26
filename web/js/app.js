@@ -1,7 +1,7 @@
 import {
   api, upload, h, fill, icon, extBadge, baseName, dirName, extOf, plural, formatBytes, formatClock, formatDuration,
   dayLabel, LANGUAGE_LABELS, remember, recall, confirmDialog, toast, logout, reportErrors, initMenu,
-  changePassword, passwordProblem,
+  changePassword, passwordProblem, track, trackPage,
 } from "./api.js";
 
 reportErrors();
@@ -25,6 +25,8 @@ const SKIP_TEXT = {
   many: () => `Mer enn ${state.limits.maxFilesPerSending} filer på en gang. Ta gjerne resten etterpå.`,
 };
 const HARMLESS = new Set(["lock", "hidden", "duplicate", "empty"]);
+// Hvor en feilmelding ble vist (for eierens logg).
+const SHOWN_WHERE = { send: "ved sending", mine: "i Mine filer", toast: "som kort beskjed", password: "ved passordbytte", start: "da siden åpnet" };
 
 const $ = (id) => document.getElementById(id);
 const enc = encodeURIComponent;
@@ -73,6 +75,38 @@ const readyItems = () => state.queue.filter((item) => item.status === "ready");
 // Hoppes over: serveren fant ingen tekst (skannet/skadet), eller filen ble avvist ved opplasting (for stor o.l.).
 const isSkipped = (item) => item.status === "skip" || (item.status === "error" && item.permanent);
 const isRetryable = (item) => item.status === "error" && !item.permanent;
+const draftId = () => (state.draft ? state.draft.id : null);
+
+// ---------- Til eierens logg (ingenting av dette vises på siden) ----------
+
+// En feilmelding hun fikk se, ordrett.
+function reportShown(where, message, { status, sendingId = draftId() } = {}) {
+  if (!message) return;
+  track("client.error_shown", `Feilmelding vist ${SHOWN_WHERE[where]}: «${message}»`, { where, message, status }, { sendingId });
+}
+
+// Filene nettleseren ikke tok med, med grunnen hun fikk se (og overskriften over listen).
+function reportSkipped(skipped, headline, hints, harmless) {
+  const files = Object.entries(skipped).flatMap(([reason, items]) => items.map(({ path, size }) => ({ name: baseName(path), size, reason })));
+  const names = files.slice(0, 5).map((f) => f.name).join(", ") + (files.length > 5 ? ` og ${files.length - 5} til` : "");
+  const reasons = Object.fromEntries(Object.keys(skipped).map((r) => [r, SKIP_TEXT[r]()]));
+  track("client.file_rejected", `${headline} ${names}`, { headline, total: files.length, reasons, hints, files: files.slice(0, 40) },
+    { sendingId: draftId(), level: harmless ? "info" : "warn" });
+}
+
+// En opplasting som ikke gikk: det hun så ved filen, eller at hun fjernet den underveis.
+function reportUpload(item, draft, err) {
+  const name = baseName(item.path);
+  const removed = !state.queue.includes(item);
+  const retry = !removed && (err.status === 404 || err.status === 409);
+  const quiet = err.aborted || removed || retry;
+  const text = err.aborted || removed
+    ? `Opplastingen av ${name} ble avbrutt${removed ? " (fjernet fra listen)" : ""}`
+    : `Opplastingen av ${name} feilet${err.status ? ` (HTTP ${err.status})` : ""}: ${err.message}${retry ? " – lastes opp på nytt i et nytt utkast" : ""}`;
+  track("client.upload_failed", text, {
+    name, size: item.file.size, status: err.status || 0, message: err.aborted ? null : err.message, aborted: Boolean(err.aborted), removed, retry,
+  }, { sendingId: draft.id, level: quiet ? "info" : "warn" });
+}
 
 // ---------- Velge filer ----------
 
@@ -89,8 +123,19 @@ function skipReason(path, file, known) {
   return null;
 }
 
+// Filer som slippes mens oversettelsen startes, tas ikke med (siden sier ingenting; eieren får vite det).
+function reportBusy(files) {
+  if (!files.length) return;
+  track("client.file_rejected", `${plural(files.length, "fil", "filer")} ble sluppet mens oversettelsen startet og ble ikke tatt med`, {
+    total: files.length, reasons: { busy: "(ingen melding vist)" }, files: files.slice(0, 40).map((f) => ({ name: f.name, size: f.size, reason: "busy" })),
+  }, { sendingId: draftId(), level: "info" });
+}
+
 function addFiles(entries) {
-  if (state.sending) return;
+  if (state.sending) {
+    reportBusy(entries.map((e) => e.file));
+    return;
+  }
   showCompose();
   const known = new Set(state.queue.map((item) => item.path.toLowerCase()));
   const skipped = {};
@@ -98,7 +143,7 @@ function addFiles(entries) {
   for (const { file, path } of entries) {
     const reason = skipReason(path, file, known);
     if (reason) {
-      (skipped[reason] ||= []).push(path);
+      (skipped[reason] ||= []).push({ path, size: file.size });
       continue;
     }
     known.add(path.toLowerCase());
@@ -120,22 +165,27 @@ function renderSkipped(skipped) {
     return;
   }
   const total = reasons.reduce((n, r) => n + skipped[r].length, 0);
-  const names = (paths) => {
-    const list = paths.map(baseName);
+  const names = (items) => {
+    const list = items.map((item) => baseName(item.path));
     return list.slice(0, 3).join(", ") + (list.length > 3 ? ` og ${list.length - 3} til` : "");
   };
-  const oldOffice = (skipped.type || []).some((p) => OLD_OFFICE.has(extOf(p)));
+  const oldOffice = (skipped.type || []).some((item) => OLD_OFFICE.has(extOf(item.path)));
   const harmless = reasons.every((r) => HARMLESS.has(r));
+  const headline = harmless
+    ? `Vi hoppet over ${plural(total, "fil", "filer")} – det er helt i orden:`
+    : `${total === 1 ? "Én fil" : `${total} filer`} ble ikke tatt med:`;
+  const hints = [
+    skipped.type ? "Dette kan oversettes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekst (.txt, .md, .csv), nettsider (.html) og RTF." : "",
+    oldOffice ? "Har du en eldre Office-fil (.doc, .ppt eller .xls)? Åpne den, velg «Lagre som» og lagre den i det nye formatet (.docx, .pptx eller .xlsx)." : "",
+  ].filter(Boolean);
   fill(box,
     h("button", { type: "button", class: "icon-btn notice-close", "aria-label": "Lukk meldingen", onclick: () => { box.hidden = true; } }, icon("close")),
-    h("p", null, h("strong", null, harmless
-      ? `Vi hoppet over ${plural(total, "fil", "filer")} – det er helt i orden:`
-      : `${total === 1 ? "Én fil" : `${total} filer`} ble ikke tatt med:`)),
+    h("p", null, h("strong", null, headline)),
     h("ul", null, reasons.map((r) => h("li", null, SKIP_TEXT[r](), " ", h("span", { class: "muted" }, `(${names(skipped[r])})`)))),
-    skipped.type ? h("p", null, "Dette kan oversettes: Word (.docx), PowerPoint (.pptx), Excel (.xlsx), PDF, tekst (.txt, .md, .csv), nettsider (.html) og RTF.") : null,
-    oldOffice ? h("p", null, "Har du en eldre Office-fil (.doc, .ppt eller .xls)? Åpne den, velg «Lagre som» og lagre den i det nye formatet (.docx, .pptx eller .xlsx).") : null
+    hints.map((hint) => h("p", null, hint))
   );
   box.hidden = false;
+  reportSkipped(skipped, headline, hints, harmless);
 }
 
 const fromList = (list) => [...list].map((file) => ({ file, path: file.webkitRelativePath || file.name }));
@@ -175,8 +225,9 @@ async function ensureDraft() {
   return state.draft;
 }
 
-function deleteServerFile(draftId, fileId) {
-  if (draftId && fileId) api(`/api/sendings/${enc(draftId)}/files/${enc(fileId)}`, { method: "DELETE" }).catch(() => {});
+// reason=cleanup: nettsiden rydder selv (ikke et klikk fra henne), så eieren ser forskjellen i loggen.
+function deleteServerFile(sendingId, fileId, reason = "user") {
+  if (sendingId && fileId) api(`/api/sendings/${enc(sendingId)}/files/${enc(fileId)}?reason=${reason}`, { method: "DELETE" }).catch(() => {});
 }
 
 async function uploadItem(item) {
@@ -189,12 +240,13 @@ async function uploadItem(item) {
     const { file } = await upload(url, item.file, { signal: controller.signal, onProgress: (pct) => progressItem(item, pct) });
     if (!state.queue.includes(item) || state.draft !== draft) {
       // Fjernet (eller utkastet byttet) mens den ble lastet opp.
-      deleteServerFile(draft.id, file.id);
+      deleteServerFile(draft.id, file.id, state.queue.includes(item) ? "cleanup" : "user");
       return;
     }
     // Serveren ser gjennom filen ved opplasting: «failed» betyr at den ikke kan oversettes (skannet, skadet).
     Object.assign(item, { status: file.status === "failed" ? "skip" : "ready", fileId: file.id, info: file });
   } catch (err) {
+    reportUpload(item, draft, err);
     if (err.aborted || !state.queue.includes(item)) return;
     if (err.status === 404 || err.status === 409) {
       // Utkastet finnes ikke lenger, eller er startet et annet sted: begynn på et nytt.
@@ -252,7 +304,7 @@ function pump() {
 async function dropOrphans(draft, sending) {
   const known = new Set(state.queue.map((item) => item.fileId).filter(Boolean));
   const orphans = (sending.files || []).filter((f) => !known.has(f.id));
-  await Promise.all(orphans.map((f) => api(`/api/sendings/${enc(draft.id)}/files/${enc(f.id)}`, { method: "DELETE" }).catch(() => {})));
+  await Promise.all(orphans.map((f) => api(`/api/sendings/${enc(draft.id)}/files/${enc(f.id)}?reason=cleanup`, { method: "DELETE" }).catch(() => {})));
   return orphans.length > 0;
 }
 
@@ -289,7 +341,7 @@ function forgetDraft() {
 // Tomt utkast: rydd bort, så det ikke blir liggende.
 function dropEmptyDraft() {
   if (state.queue.length || !state.draft || state.pumping) return;
-  api(`/api/sendings/${enc(state.draft.id)}`, { method: "DELETE" }).catch(() => {});
+  api(`/api/sendings/${enc(state.draft.id)}?reason=cleanup`, { method: "DELETE" }).catch(() => {});
   forgetDraft();
 }
 
@@ -453,7 +505,7 @@ async function matchLanguage(targetLanguage, note) {
     Object.assign(draft, { targetLanguage, note });
     return true;
   }
-  await api(`/api/sendings/${enc(draft.id)}`, { method: "DELETE" }).catch(() => {});
+  await api(`/api/sendings/${enc(draft.id)}?reason=language`, { method: "DELETE" }).catch(() => {});
   forgetDraft();
   return false;
 }
@@ -492,13 +544,13 @@ function showSendError(err) {
   const box = $("send-error");
   // 503: oversettelsen er ikke satt opp ennå. Ingen feil hos henne – filene ligger trygt og kan startes senere.
   const soft = err.status === 503;
+  const extra = soft
+    ? "Filene dine er lagret, så du kan prøve igjen senere – også om du lukker siden i mellomtiden."
+    : err.status === -1 ? "" : "Trykk «Oversett til norsk» for å prøve igjen – det som allerede er lastet opp, lastes ikke opp på nytt.";
   box.classList.toggle("is-soft", soft);
-  fill(box,
-    h("p", null, err.message),
-    soft
-      ? h("p", null, "Filene dine er lagret, så du kan prøve igjen senere – også om du lukker siden i mellomtiden.")
-      : err.status === -1 ? null : h("p", null, "Trykk «Oversett til norsk» for å prøve igjen – det som allerede er lastet opp, lastes ikke opp på nytt."));
+  fill(box, h("p", null, err.message), extra ? h("p", null, extra) : null);
   box.hidden = false;
+  reportShown("send", [err.message, extra].filter(Boolean).join(" "), { status: err.status });
   if (soft) refresh();
 }
 
@@ -713,7 +765,10 @@ async function refresh() {
   } catch (err) {
     state.failures++;
     if (err.status !== 401) {
-      fill($("mine-error"), h("p", null, "Fikk ikke hentet filene dine akkurat nå. Vi prøver igjen av oss selv."));
+      const message = "Fikk ikke hentet filene dine akkurat nå. Vi prøver igjen av oss selv.";
+      // Bare første gang meldingen dukker opp, ikke for hvert nye forsøk.
+      if ($("mine-error").hidden) reportShown("mine", message, { status: err.status, sendingId: null });
+      fill($("mine-error"), h("p", null, message));
       $("mine-error").hidden = false;
     }
   }
@@ -723,7 +778,7 @@ async function refresh() {
 async function removeSending(s) {
   const ok = await confirmDialog({
     title: "Slette disse filene?",
-    text: `${plural(s.files.length, "fil", "filer")} og oversettelsene blir slettet for godt. Det kan ikke angres.`,
+    text: `${plural(s.files.length, "fil", "filer")} og oversettelsene fjernes fra «Mine filer». Det kan ikke angres.`,
     confirm: "Ja, slett",
     cancel: "Nei, behold",
     danger: true,
@@ -737,6 +792,7 @@ async function removeSending(s) {
     $("mine").focus();
   } catch (err) {
     toast(err.message);
+    reportShown("toast", err.message, { status: err.status, sendingId: s.id });
   }
 }
 
@@ -748,6 +804,7 @@ async function sendDraft(s, button) {
     refresh();
   } catch (err) {
     toast(err.message);
+    reportShown("toast", err.message, { status: err.status, sendingId: s.id });
     button.disabled = false;
   }
 }
@@ -780,6 +837,7 @@ $("pw-form").addEventListener("submit", async (e) => {
   const error = $("pw-error");
   const problem = current ? passwordProblem(next, $("pw-repeat").value, current) : "Skriv inn passordet du bruker nå.";
   say(error, problem);
+  reportShown("password", problem, { sendingId: null });
   if (problem) return;
   const button = $("pw-save");
   button.disabled = true;
@@ -791,6 +849,7 @@ $("pw-form").addEventListener("submit", async (e) => {
     toast("Passordet er byttet.");
   } catch (err) {
     say(error, err.message);
+    reportShown("password", err.message, { status: err.status, sendingId: null });
   }
   button.disabled = false;
   button.textContent = "Lagre nytt passord";
@@ -846,7 +905,10 @@ window.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   dragging(false);
-  if (state.sending) return;
+  if (state.sending) {
+    reportBusy([...e.dataTransfer.files]);
+    return;
+  }
   // Oppføringene må hentes før første await; etterpå er de borte.
   const entries = [...e.dataTransfer.items]
     .filter((item) => item.kind === "file" && item.webkitGetAsEntry)
@@ -893,6 +955,7 @@ document.addEventListener("visibilitychange", () => {
 
 api("/api/auth/me").then((me) => {
   personalize(me);
+  trackPage();
   renderQueue();
   if (me.user.mustChangePassword) openPassword(true);
   refresh();
@@ -900,4 +963,5 @@ api("/api/auth/me").then((me) => {
   if (err.status === 401) return;
   fill($("mine-error"), h("p", null, err.message));
   $("mine-error").hidden = false;
+  reportShown("start", err.message, { status: err.status, sendingId: null });
 });
