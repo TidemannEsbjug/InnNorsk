@@ -478,7 +478,10 @@ function assignStyles(items, glyphs) {
       else {
         const run = glyphs.slice(found, found + chars.length);
         if (found !== cursor || run.length !== chars.length || run.some((g, i) => g.ch !== chars[i])) exact = false;
-        else it.glyphs = run;
+        else {
+          it.glyphs = run;
+          it.gi = found;
+        }
         last = glyphs[found];
         cursor = found + chars.length;
       }
@@ -488,6 +491,56 @@ function assignStyles(items, glyphs) {
     Object.assign(it, { color: g.color, alpha: g.alpha, invisible: g.invisible, op: g.op, opEnd: end.op });
   }
   return exact && cursor === glyphs.length;
+}
+
+// Tekstbiter uten sikker kobling (høyre-til-venstre-tekst som pdf.js snur, tekst utenfor siden som pdf.js utelater, og
+// bitene rett etter): tegnene deres står blant tegnene mellom de nærmeste koblede bitene (hullet). it.loose sier hvor
+// biten kan komme fra: fra sidens egen strøm (page: sidens synlige tegn i hullet kan stave den; ops: tekstoperatorene
+// i hullet) og/eller fra skjemaobjekter (forms: tegningene der synlige tegn i hullet kan stave den). Se freezeForms.
+// (pdf.js leser teksten i samme rekkefølge som operatorene, så tegnene til en bit står aldri utenfor hullet sitt.)
+function looseSources(items, glyphs) {
+  let from = 0;
+  let pending = [];
+  const settle = (to) => {
+    if (!pending.length) return;
+    const page = new Map();
+    const forms = new Map();
+    const hidden = new Map();
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let k = from; k < to; k++) {
+      const g = glyphs[k];
+      let m = page;
+      if (g.hidden) m = hidden;
+      else if (g.form >= 0) {
+        if (!forms.has(g.form)) forms.set(g.form, new Map());
+        m = forms.get(g.form);
+      } else if (g.sop >= 0) {
+        lo = Math.min(lo, g.sop);
+        hi = Math.max(hi, g.sop);
+      } else continue;
+      m.set(g.ch, (m.get(g.ch) || 0) + 1);
+    }
+    for (const it of pending) {
+      const need = new Map();
+      for (const ch of norm(it.str)) if (!isSpace(ch)) need.set(ch, (need.get(ch) || 0) + 1);
+      const fits = (m) => [...need].every(([ch, n]) => (m.get(ch) || 0) >= n);
+      const inPage = page.size > 0 && fits(page);
+      const inForms = [...forms].filter(([, m]) => fits(m)).map(([f]) => f);
+      // Kan bare tegn i et skjult lag stave biten, er den skjult (se extractPages). Kan ingenting i hullet stave den, er
+      // kilden ukjent: da regnes alle skjemaobjektene med synlige tegn der.
+      const unknown = !inPage && !inForms.length;
+      it.loose = { page: inPage, ops: lo <= hi ? [lo, hi] : null, forms: unknown ? [...forms.keys()] : inForms, unknown, hidden: unknown && fits(hidden) };
+    }
+    pending = [];
+  };
+  for (const it of items) {
+    if (it.glyphs) {
+      settle(it.gi);
+      from = it.gi + it.glyphs.length;
+    } else if (it.str.trim()) pending.push(it);
+  }
+  settle(glyphs.length);
 }
 
 // pdf.js setter inn mellomrom der tegnene står langt fra hverandre. Er nesten alle mellomrommene slike (sperret tekst:
@@ -527,16 +580,17 @@ function respace(it) {
   return { str: out + gap, tracked: false };
 }
 
-// Venter (høyst `ms`) til pdf.js har levert sidens egne bilder, så page.cleanup() kan frigjøre dem.
-async function settleImages(page, imageIds, ms = 3000) {
-  const ids = imageIds.filter((id) => !id.startsWith("g_"));
+// Venter (høyst `ms`) til pdf.js har levert sidens egne bilder, så page.cleanup() kan frigjøre dem (med `shared` også
+// bildene i fellesbufferen, så ingen kommer etter at den er tømt).
+async function settleImages(page, imageIds, ms = 3000, shared = false) {
+  const ids = imageIds.filter((id) => shared || !id.startsWith("g_"));
   if (!ids.length) return;
   let timer = null;
   try {
     await Promise.race([
       Promise.all(ids.map((id) => new Promise((resolve) => {
         try {
-          page.objs.get(id, resolve);
+          (id.startsWith("g_") ? page.commonObjs : page.objs).get(id, resolve);
         } catch {
           resolve(null);
         }
@@ -550,82 +604,61 @@ async function settleImages(page, imageIds, ms = 3000) {
   }
 }
 
-// Hvor mye plass de dekodede bildene som brukes på flere sider, tar (bare de pdf.js har levert). Fellesbufferen tømmes
-// når de til sammen tar mer enn grensen (først SHARED_IMAGES) og minst SHARED_STALE av det er bilder som ikke er brukt
-// på de SHARED_RECENT siste sidene (bare da frigjør tømmingen noe; bilder som går igjen på hver side eller annenhver
-// side, blir liggende). Brukes et bilde som ble tømt bort, igjen innen SHARED_REUSE sider (bakgrunnene i ulike
-// lysbildeoppsett, bilder som går igjen med noen siders mellomrom), dobles grensen, men aldri over SHARED_MAX, så
-// bildene som er i bruk, ikke dekodes på nytt hele tiden. Uansett blir det aldri liggende mer enn SHARED_IMAGES utover
-// bildene siden selv brukte (Workeren har 128 MB).
+// Bilder brukt på flere sider (pdf.js: g_-id i commonObjs) blir liggende dekodet i hovedtråden, og pdf.js-arbeideren
+// sender dem ikke igjen når de brukes på nytt (den husker bare id-en). Etter hver side slippes bilder til de som er
+// igjen, tar høyst `limit` (SHARED_IMAGES) til sammen, sidens egne bilder medregnet: først de som er brukt lengst
+// siden, så sidens egne bilder som siden ikke trengte pikslene til (bakgrunner og bilder under teksten). Bilder siden
+// trengte pikslene til (dekker de tekst?), blir liggende, så de kan sjekkes på neste side uten å lese den på nytt. Et
+// sluppet bilde dekodes ikke igjen så lenge pikslene ikke trengs; se extractPages. (Workeren har 128 MB.)
 const SHARED_IMAGES = 48e6;
-const SHARED_STALE = 12e6;
-const SHARED_RECENT = 2;
-const SHARED_REUSE = 8;
-const SHARED_MAX = 64e6;
-function sharedImagePolicy() {
+function sharedImagePolicy(limit = SHARED_IMAGES) {
+  // id → { n: siste side bildet ble brukt på, needed: pikslene trengtes der } (eldste først).
   const lastUse = new Map();
-  let limit = SHARED_IMAGES;
-  let cleaned = new Set();
-  let cleanedAt = -Infinity;
   return {
-    get limit() {
-      return limit;
-    },
-    // Bildene siden n brukte: [id, kjennetegn] (kjennetegnet er det samme når bildet dekodes på nytt med ny id).
-    use(images, n) {
-      for (const [id, mark] of images) {
+    // Bildene (id-er) siden n brukte, og de av dem siden trengte pikslene til.
+    use(ids, n, needed = new Set()) {
+      for (const id of ids) {
         if (!id.startsWith("g_")) continue;
-        if (mark != null && cleaned.has(mark) && n - cleanedAt <= SHARED_REUSE) {
-          limit = Math.min(limit * 2, SHARED_MAX);
-          cleaned = new Set();
-        }
-        lastUse.set(id, { n, mark });
+        lastUse.delete(id);
+        lastUse.set(id, { n, needed: needed.has(id) });
       }
     },
-    // Skal fellesbufferen tømmes etter side n? `bytes(ids)`: hvor mye plass bildene tar.
-    clean(n, bytes) {
-      if (!lastUse.size) return false;
-      const stale = [];
-      const own = [];
-      for (const [id, use] of lastUse) {
-        if (use.n <= n - SHARED_RECENT) stale.push(id);
-        if (use.n === n) own.push(id);
+    // Bildene som skal slippes etter side n. `bytes(id)`: plassen bildet tar (0 når pdf.js ikke har levert det ennå:
+    // det kan ikke slippes nå, men regnes med når det er levert).
+    evict(n, bytes) {
+      const size = new Map();
+      let total = 0;
+      for (const id of lastUse.keys()) {
+        size.set(id, bytes(id));
+        total += size.get(id);
       }
-      const total = bytes([...lastUse.keys()]);
-      const over = total > SHARED_IMAGES + bytes(own);
-      if (!over && (!stale.length || bytes(stale) < SHARED_STALE || total <= limit)) return false;
-      cleaned = new Set([...lastUse.values()].map((use) => use.mark).filter((m) => m != null));
-      cleanedAt = n;
+      const out = [];
+      for (const own of [false, true]) {
+        for (const [id, use] of lastUse) {
+          if (total <= limit) break;
+          if ((use.n >= n) !== own || (own && use.needed) || !size.get(id)) continue;
+          out.push(id);
+          total -= size.get(id);
+        }
+      }
+      for (const id of out) lastUse.delete(id);
+      return out;
+    },
+    // Fellesbufferen er tømt (pdf.cleanup): ingenting ligger igjen.
+    reset() {
       lastUse.clear();
-      return true;
     },
   };
 }
 
-// Kjennetegn for et dekodet bilde: mål og et utvalg av pikslene.
-function imageMark(img) {
-  const data = img && img.data;
-  if (!data || !data.length || !img.width || !img.height) return null;
-  let h = 2166136261;
-  for (let k = 0; k < 64; k++) {
-    h ^= data[Math.floor(((k + 0.5) / 64) * data.length)];
-    h = Math.imul(h, 16777619) >>> 0;
+function sharedBytes(page, id) {
+  try {
+    if (!page.commonObjs.has(id)) return 0;
+    const img = page.commonObjs.get(id);
+    return img && img.data && img.data.length ? img.data.length : img && img.width && img.height ? img.width * img.height * 4 : 0;
+  } catch {
+    return 0;
   }
-  return `${img.width}x${img.height}:${data.length}:${h}`;
-}
-
-function sharedBytes(page, ids) {
-  let n = 0;
-  for (const id of ids) {
-    try {
-      if (!page.commonObjs.has(id)) continue;
-      const img = page.commonObjs.get(id);
-      n += img && img.data && img.data.length ? img.data.length : img && img.width && img.height ? img.width * img.height * 4 : 0;
-    } catch {
-      /* ikke levert */
-    }
-  }
-  return n;
 }
 
 // Det dekodede bildet (pdf.js legger det i page.objs, eller commonObjs for bilder brukt på flere sider).
@@ -740,9 +773,10 @@ async function extractPages(buffer, opts = {}) {
   const pages = [];
   // Antall tekstbiter som er tatt ut fordi de er dekket (se under; ikke tekst i skjulte lag).
   let covered = 0;
-  // Bilder brukt på flere sider (pdf.js: g_-id i commonObjs) blir liggende dekodet til dokumentet lukkes. Blir de til
-  // sammen store (skannede sider med ulike bilder), tømmes dokumentets fellesbuffer; de dekodes igjen ved behov.
-  const shared = sharedImagePolicy();
+  // Bilder brukt på flere sider (pdf.js: g_-id i commonObjs) blir liggende dekodet til dokumentet lukkes, om de ikke
+  // slippes (se sharedImagePolicy). `dropped`: bildene som er sluppet siden fellesbufferen sist ble tømt.
+  const shared = sharedImagePolicy(opts.sharedImages);
+  const dropped = new Set();
   // Lag (valgfritt innhold): tilstanden er bare kjent for grupper som finnes i dokumentets /OCProperties.
   let ocConfig = null;
   try {
@@ -750,267 +784,302 @@ async function extractPages(buffer, opts = {}) {
   } catch {
     ocConfig = null;
   }
-  // Et uttrykk (/VE) regnes ut av pdf.js når det bare bruker kjente grupper og operatorene And, Or og Not.
-  const knownExpression = (e, depth = 0) => Array.isArray(e) && e.length >= 2 && depth < 10 && ["And", "Or", "Not"].includes(e[0])
-    && e.slice(1).every((x) => (Array.isArray(x) ? knownExpression(x, depth + 1) : typeof x === "string" && ocConfig.getGroup(x)));
+  // Et uttrykk (/VE) med And, Or og Not regnes ut med de kjente gruppene (som pdf.js gjør); en gruppe som ikke finnes i
+  // /OCGs, eller en del pdf.js har kuttet bort (for dypt), er ukjent (null). And med en gruppe som er av, er av, og Or
+  // med en som er på, er på, uansett resten.
+  const known = (x) => typeof x === "string" && ocConfig.getGroup(x);
+  const evaluate = (e, depth = 0) => {
+    if (!Array.isArray(e) || e.length < 2 || depth > 20 || !["And", "Or", "Not"].includes(e[0])) return null;
+    const vals = e.slice(1).map((x) => (Array.isArray(x) ? evaluate(x, depth + 1) : known(x) ? Boolean(known(x).visible) : null));
+    if (e[0] === "Not") return vals[0] == null ? null : !vals[0];
+    if (e[0] === "And") return vals.includes(false) ? false : vals.includes(null) ? null : true;
+    return vals.includes(true) ? true : vals.includes(null) ? null : false;
+  };
+  // Kan uttrykket ikke regnes ut, men bruker det en kjent gruppe som er av, regnes laget som av: teksten står da urørt
+  // (heller det enn en synlig oversettelse av noe som er skjult).
+  const offIn = (e, depth = 0) => Array.isArray(e) && depth <= 20
+    && e.slice(1).some((x) => (Array.isArray(x) ? offIn(x, depth + 1) : known(x) && !known(x).visible));
   const ocState = (group) => {
     if (!ocConfig || !group || typeof ocConfig.getGroup !== "function") return null;
     if (group.type === "OCG") return ocConfig.getGroup(group.id) ? Boolean(ocConfig.isVisible(group)) : null;
-    if (group.type === "OCMD" && group.expression) return knownExpression(group.expression) ? Boolean(ocConfig.isVisible(group)) : null;
+    if (group.type === "OCMD" && group.expression) {
+      const state = evaluate(group.expression);
+      return state != null ? state : offIn(group.expression) ? false : null;
+    }
     if (group.type === "OCMD" && Array.isArray(group.ids) && group.ids.length
       && group.ids.every((id) => ocConfig.getGroup(id))) return Boolean(ocConfig.isVisible(group));
     return null;
   };
-  for (let n = 1; n <= pdf.numPages; n++) {
-    const page = await pdf.getPage(n);
-    // Operatorlisten og tekstinnholdet slippes så snart de er lest (let … = null): ellers kan de bli liggende i minnet
-    // til neste side er lest (to operatorlister samtidig; kart og tette vektorsider har titusener av stier).
-    let opList = await page.getOperatorList();
-    let content = await page.getTextContent();
-    // Fontenes ekte navn (f.eks. "ABCDEF+Calibri-Bold") finnes først etter at siden er tolket.
-    const realNames = new Map();
-    const realName = (id) => {
-      if (!realNames.has(id)) {
-        let name = "";
-        try {
-          const font = page.commonObjs.get(id);
-          name = (font && (font.name || font.loadedName)) || "";
-        } catch {
-          /* ukjent font: fall tilbake til pdf.js sin id */
-        }
-        realNames.set(id, name || id || "");
-      }
-      return realNames.get(id);
-    };
-    let items = [];
-    for (const it of content.items) {
-      if (typeof it.str !== "string" || !it.str) continue;
-      const tr = it.transform || [1, 0, 0, 1, 0, 0];
-      const fontName = realName(it.fontName);
-      const css = (content.styles[it.fontName] || {}).fontFamily;
-      // Høyden gir skriftstørrelsen; bredden kan være strukket (Tz, f.eks. OCR-lag som tilpasser ordbredden).
-      const sx = Math.hypot(tr[0], tr[1]);
-      const sy = Math.hypot(tr[2], tr[3]);
-      const size = sy || sx || 11;
-      // Skråstilt tekst: aksene står ikke vinkelrett. Rotert tekst er ikke kursiv.
-      const skew = sx && sy ? Math.abs(tr[0] * tr[2] + tr[1] * tr[3]) / (sx * sy) : 0;
-      items.push({
-        str: it.str,
-        x: tr[4],
-        y: tr[5],
-        w: it.width || 0,
-        size,
-        angle: Math.atan2(tr[1], tr[0]),
-        style: {
-          family: familyOf(fontName, css),
-          bold: BOLD.test(fontName),
-          italic: ITALIC.test(fontName) || skew > 0.1,
-          size: Math.round(size * 10) / 10,
-          font: fontName,
-        },
-      });
-    }
-    const fontOf = (id) => {
-      try {
-        return page.commonObjs.get(id);
-      } catch {
-        return null;
-      }
-    };
-    const scan = scanOps(opList, OPS, fontOf, ocState);
-    opList = null;
-    content = null;
-    const exact = assignStyles(items, scan.glyphs);
-    // Er alle synlige tegn i skjemaobjekter koblet til en tekstbit, står en tekstbit uten kobling i sidens egen strøm.
-    let formGlyphs = 0;
-    for (const g of scan.glyphs) if (g.form >= 0 && !g.hidden) formGlyphs++;
-    for (const it of items) for (const g of it.glyphs || []) if (g.form >= 0 && !g.hidden) formGlyphs--;
-    const formTextMapped = formGlyphs <= 0;
-    // Tekst i et lag som er av (valgfritt innhold), synes ikke: den oversettes ikke og tegnes ikke, og tekstoperatorene
-    // står urørt i laget (hiddenOps; skjemaobjekter med slik tekst endres ikke, se writePdf). Bare tekstbiter der alle
-    // tegnene sikkert ligger i et skjult lag, regnes med. Dette gjelder også når dekk ikke tas ut (noCover): at et lag
-    // er av, er ikke en gjetning.
-    const hiddenOps = [];
-    if (scan.glyphs.some((g) => g.hidden)) {
-      const kept = [];
-      for (const it of items) {
-        if (it.glyphs && it.glyphs.every((g) => g.hidden)) {
-          for (let s = it.glyphs[0].sop; s >= 0 && s <= it.glyphs[it.glyphs.length - 1].sop; s++) hiddenOps.push(s);
-        } else kept.push(it);
-      }
-      items = kept;
-    }
-    for (const it of items) {
-      const { str, tracked } = respace(it);
-      it.str = str;
-      it.style.tracked = tracked;
-      it.style.color = it.color;
-      if (it.alpha < 1) it.style.alpha = Math.round(it.alpha * 100) / 100;
-      const g = it.glyphs;
-      it.nbspBefore = Boolean(g && g[0].nbsp);
-      it.sops = g ? [g[0].sop, g[g.length - 1].sop] : null;
-      // Skjemaobjektene (tegnenummer i scan.formDraws) tekstbiten er tegnet i; null når koblingen er usikker.
-      it.forms = g ? [...new Set(g.map((x) => x.form).filter((f) => f >= 0))] : null;
-      // Bindestrek sist med mellomrom foran (pdf.js setter inn mellomrom ved hull): orddeling bare når det ikke er et
-      // mellomromstegn og hullet ikke er et ordmellomrom. I TeX er « -» med et hull på et ordmellomrom (TJ-tall eller en
-      // flytting med Td) en tankestrek; en orddelingsstrek tegnet for seg (LibreOffice) har et lite hull foran. Er hullet
-      // ukjent (ny tekstlinje), regnes det som orddeling. En egen tekstbit avgjøres etter hullet i segmentsOf.
-      const last = g && g[g.length - 1];
-      if (last && last.ch === "-" && g.length > 1 && /\s-$/.test(it.str.trimEnd())) it.softHyphen = !last.space && (last.gap == null || last.gap < 0.2);
-      else if (last && it.str.trim() === "-") it.softHyphen = last.space ? false : "gap";
-      it.glyphs = undefined;
-    }
-    const [x0, y0, x1, y1] = page.view;
-    const width = x1 - x0;
-    const height = y1 - y0;
-    // Tekst som et senere, stort og ugjennomsiktig bilde dekker (skannet side med OCR-tekst under bildet), er i
-    // praksis usynlig. Vannmerker og stempler med gjennomsiktighet (alfa, maske, ca < 1, myk maske) skjuler ikke teksten,
-    // og heller ikke et bilde som er klippet til noe annet enn et rektangel. Et beskåret bilde teller bare med den
-    // synlige delen.
-    const big = scan.graphics.filter((g) => g.image && (g.x1 - g.x0) * (g.y1 - g.y0) >= 0.25 * width * height);
-    const images = new Map();
-    for (const g of big.filter((b) => !b.mask && (b.alpha ?? 1) >= 0.99 && !b.soft && !b.odd && !b.oc)) {
-      const under = items.filter((it) => !it.invisible && g.op > it.op && it.x + it.w / 2 > g.x0 && it.x + it.w / 2 < g.x1
-        && it.y + it.size * 0.3 > g.y0 && it.y + it.size * 0.3 < g.y1);
-      if (!under.length) continue;
-      if (!images.has(g)) images.set(g, await imageOf(page, g));
-      const img = images.get(g);
-      for (const it of under) {
-        const y = it.y + it.size * 0.3;
-        const hits = [0.25, 0.5, 0.75].filter((f) => opaqueAt(img, g, it.x + it.w * f, y)).length;
-        if (hits >= 2) it.invisible = true;
-      }
-    }
-    // Tekst som en senere tegnet, ugjennomsiktig flate eller et mindre bilde dekker nesten helt (overmaling i en
-    // PDF-redigerer, klistrelapp, sladding), synes ikke i originalen. Den tas ut før oppsettet: den oversettes ikke og
-    // tegnes ikke (tekstoperatoren fjernes, eller står urørt under dekket når den deles med uendret tekst).
-    // Bare det som sikkert dekker, teller: et rett rektangel eller et bilde uten skråstilling, med fast farge (ikke
-    // mønster), helt ugjennomsiktig, uten myk maske eller blandemodus, og ikke klippet til noe annet enn et rektangel
-    // (klippet regnes med), og ikke i et lag med ukjent tilstand. Er det tvil, blir teksten stående. Blir det ingen synlig
-    // tekst igjen på siden, tas ingenting ut.
-    const covers = opts.noCover ? [] : scan.graphics.filter((g) => !big.includes(g) && !g.soft && !g.odd && !g.oc && (g.alpha ?? 1) >= 0.999
-      && (g.image ? !g.mask && !g.skew : g.fill && g.rect && g.parts === 1 && !g.pattern) && g.x1 - g.x0 > 2 && g.y1 - g.y0 > 2);
-    const first = covers.length ? minOf(items, (it) => it.op ?? Infinity) : Infinity;
-    const later = covers.filter((g) => g.op > first);
-    if (later.length) {
-      // Rutenett over siden: et dekke som dekker minst 90 % av tegnrammen, dekker også midten av den, så bare dekkene i
-      // ruten der midten ligger, må sjekkes (i tegnerekkefølge, fra det første som er tegnet etter teksten).
-      const cell = Math.max(24, Math.max(width, height) / 32);
-      const grid = new Map();
-      const wide = [];
-      for (const g of later) {
-        const c0 = Math.floor((g.x0 - x0) / cell);
-        const c1 = Math.floor((g.x1 - x0) / cell);
-        const r0 = Math.floor((g.y0 - y0) / cell);
-        const r1 = Math.floor((g.y1 - y0) / cell);
-        if ((c1 - c0 + 1) * (r1 - r0 + 1) > 256) {
-          wide.push(g);
-          continue;
-        }
-        for (let c = c0; c <= c1; c++) {
-          for (let r = r0; r <= r1; r++) {
-            const key = `${c},${r}`;
-            if (!grid.has(key)) grid.set(key, []);
-            grid.get(key).push(g);
+  try {
+    for (let n = 1; n <= pdf.numPages; n++) {
+      const page = await pdf.getPage(n);
+      // Operatorlisten og tekstinnholdet slippes så snart de er lest (let … = null): ellers kan de bli liggende i minnet
+      // til neste side er lest (to operatorlister samtidig; kart og tette vektorsider har titusener av stier).
+      let opList = await page.getOperatorList();
+      let content = await page.getTextContent();
+      // Fontenes ekte navn (f.eks. "ABCDEF+Calibri-Bold") finnes først etter at siden er tolket.
+      const realNames = new Map();
+      const realName = (id) => {
+        if (!realNames.has(id)) {
+          let name = "";
+          try {
+            const font = page.commonObjs.get(id);
+            name = (font && (font.name || font.loadedName)) || "";
+          } catch {
+            /* ukjent font: fall tilbake til pdf.js sin id */
           }
+          realNames.set(id, name || id || "");
         }
-      }
-      const after = (list, op) => {
-        let lo = 0;
-        let hi = list.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (list[mid].op <= op) lo = mid + 1;
-          else hi = mid;
-        }
-        return lo;
+        return realNames.get(id);
       };
+      let items = [];
+      for (const it of content.items) {
+        if (typeof it.str !== "string" || !it.str) continue;
+        const tr = it.transform || [1, 0, 0, 1, 0, 0];
+        const fontName = realName(it.fontName);
+        const css = (content.styles[it.fontName] || {}).fontFamily;
+        // Høyden gir skriftstørrelsen; bredden kan være strukket (Tz, f.eks. OCR-lag som tilpasser ordbredden).
+        const sx = Math.hypot(tr[0], tr[1]);
+        const sy = Math.hypot(tr[2], tr[3]);
+        const size = sy || sx || 11;
+        // Skråstilt tekst: aksene står ikke vinkelrett. Rotert tekst er ikke kursiv.
+        const skew = sx && sy ? Math.abs(tr[0] * tr[2] + tr[1] * tr[3]) / (sx * sy) : 0;
+        items.push({
+          str: it.str,
+          x: tr[4],
+          y: tr[5],
+          w: it.width || 0,
+          size,
+          angle: Math.atan2(tr[1], tr[0]),
+          style: {
+            family: familyOf(fontName, css),
+            bold: BOLD.test(fontName),
+            italic: ITALIC.test(fontName) || skew > 0.1,
+            size: Math.round(size * 10) / 10,
+            font: fontName,
+          },
+        });
+      }
+      const fontOf = (id) => {
+        try {
+          return page.commonObjs.get(id);
+        } catch {
+          return null;
+        }
+      };
+      const scan = scanOps(opList, OPS, fontOf, ocState);
+      opList = null;
+      content = null;
+      const exact = assignStyles(items, scan.glyphs);
+      if (!exact) looseSources(items, scan.glyphs);
+      // Pikslene til et bilde (se imageOf). Et bilde som er sluppet (se sharedImagePolicy), sender pdf.js ikke igjen: da
+      // tømmes fellesbufferen (arbeideren glemmer bildene) og operatorene leses på nytt, så bildene dekodes igjen med nye
+      // id-er i samme rekkefølge.
+      const needed = new Set();
+      const load = async (g) => {
+        if (g.id && dropped.has(g.id)) {
+          await settleImages(page, scan.imageIds.filter((id) => !dropped.has(id)), 3000, true);
+          await pdf.cleanup();
+          dropped.clear();
+          shared.reset();
+          const again = scanOps(await page.getOperatorList(), OPS, fontOf, ocState).imageIds;
+          const map = new Map(again.length === scan.imageIds.length ? scan.imageIds.map((id, k) => [id, again[k]]) : []);
+          for (const x of scan.graphics) if (x.id) x.id = map.get(x.id) || null;
+          scan.imageIds = again;
+          const before = [...needed];
+          needed.clear();
+          for (const id of before) if (map.get(id)) needed.add(map.get(id));
+        }
+        if (g.id) needed.add(g.id);
+        return imageOf(page, g);
+      };
+      // Tekst i et lag som er av (valgfritt innhold), synes ikke: den oversettes ikke og tegnes ikke, og tekstoperatorene
+      // står urørt i laget (hiddenOps; skjemaobjekter med slik tekst endres ikke, se writePdf). Bare tekstbiter der alle
+      // tegnene sikkert ligger i et skjult lag, regnes med, og biter uten sikker kobling som bare tegn i et skjult lag kan
+      // stave (se looseSources). Dette gjelder også når dekk ikke tas ut (noCover): at et lag er av, er ikke en gjetning.
+      const hiddenOps = [];
+      if (scan.glyphs.some((g) => g.hidden)) {
+        const kept = [];
+        for (const it of items) {
+          if (it.glyphs && it.glyphs.every((g) => g.hidden)) {
+            for (let s = it.glyphs[0].sop; s >= 0 && s <= it.glyphs[it.glyphs.length - 1].sop; s++) hiddenOps.push(s);
+          } else if (!(it.loose && it.loose.hidden)) kept.push(it);
+        }
+        items = kept;
+      }
       for (const it of items) {
-        if (it.invisible || Math.abs(it.angle) >= 0.01 || !it.str.trim() || !(it.w > 0)) continue;
-        const box = { x0: it.x, x1: it.x + it.w, y0: it.y - it.size * 0.2, y1: it.y + it.size * 0.75 };
-        const area = (box.x1 - box.x0) * (box.y1 - box.y0);
-        const key = `${Math.floor(((box.x0 + box.x1) / 2 - x0) / cell)},${Math.floor(((box.y0 + box.y1) / 2 - y0) / cell)}`;
-        const opEnd = it.opEnd ?? it.op;
-        for (const list of [grid.get(key) || [], wide]) {
-          for (let n = after(list, opEnd); n < list.length && !it.covered; n++) {
-            const g = list[n];
-            const w = Math.min(g.x1, box.x1) - Math.max(g.x0, box.x0);
-            const h = Math.min(g.y1, box.y1) - Math.max(g.y0, box.y0);
-            if (w <= 0 || h <= 0 || w * h < 0.9 * area) continue;
-            if (g.image) {
-              // Bilde med gjennomsiktighet: ugjennomsiktig over hele tegnrammen.
-              if (!images.has(g)) images.set(g, await imageOf(page, g));
-              const img = images.get(g);
-              if (!img) continue;
-              let solid = true;
-              for (const fx of [0.1, 0.3, 0.5, 0.7, 0.9]) {
-                for (const fy of [0.2, 0.5, 0.8]) {
-                  if (solid && !opaqueAt(img, g, box.x0 + (box.x1 - box.x0) * fx, box.y0 + (box.y1 - box.y0) * fy, 250)) solid = false;
-                }
-              }
-              if (!solid) continue;
-            }
-            it.covered = true;
-          }
+        const { str, tracked } = respace(it);
+        it.str = str;
+        it.style.tracked = tracked;
+        it.style.color = it.color;
+        if (it.alpha < 1) it.style.alpha = Math.round(it.alpha * 100) / 100;
+        const g = it.glyphs;
+        it.nbspBefore = Boolean(g && g[0].nbsp);
+        it.sops = g ? [g[0].sop, g[g.length - 1].sop] : null;
+        // Skjemaobjektene (tegnenummer i scan.formDraws) tekstbiten er tegnet i; null når koblingen er usikker.
+        it.forms = g ? [...new Set(g.map((x) => x.form).filter((f) => f >= 0))] : null;
+        it.gi = undefined;
+        // Bindestrek sist med mellomrom foran (pdf.js setter inn mellomrom ved hull): orddeling bare når det ikke er et
+        // mellomromstegn og hullet ikke er et ordmellomrom. I TeX er « -» med et hull på et ordmellomrom (TJ-tall eller en
+        // flytting med Td) en tankestrek; en orddelingsstrek tegnet for seg (LibreOffice) har et lite hull foran. Er hullet
+        // ukjent (ny tekstlinje), regnes det som orddeling. En egen tekstbit avgjøres etter hullet i segmentsOf.
+        const last = g && g[g.length - 1];
+        if (last && last.ch === "-" && g.length > 1 && /\s-$/.test(it.str.trimEnd())) it.softHyphen = !last.space && (last.gap == null || last.gap < 0.2);
+        else if (last && it.str.trim() === "-") it.softHyphen = last.space ? false : "gap";
+        it.glyphs = undefined;
+      }
+      const [x0, y0, x1, y1] = page.view;
+      const width = x1 - x0;
+      const height = y1 - y0;
+      // Tekst som et senere, stort og ugjennomsiktig bilde dekker (skannet side med OCR-tekst under bildet), er i
+      // praksis usynlig. Vannmerker og stempler med gjennomsiktighet (alfa, maske, ca < 1, myk maske) skjuler ikke teksten,
+      // og heller ikke et bilde som er klippet til noe annet enn et rektangel. Et beskåret bilde teller bare med den
+      // synlige delen.
+      const big = scan.graphics.filter((g) => g.image && (g.x1 - g.x0) * (g.y1 - g.y0) >= 0.25 * width * height);
+      const images = new Map();
+      for (const g of big.filter((b) => !b.mask && (b.alpha ?? 1) >= 0.99 && !b.soft && !b.odd && !b.oc)) {
+        const under = items.filter((it) => !it.invisible && g.op > it.op && it.x + it.w / 2 > g.x0 && it.x + it.w / 2 < g.x1
+          && it.y + it.size * 0.3 > g.y0 && it.y + it.size * 0.3 < g.y1);
+        if (!under.length) continue;
+        if (!images.has(g)) images.set(g, await load(g));
+        const img = images.get(g);
+        for (const it of under) {
+          const y = it.y + it.size * 0.3;
+          const hits = [0.25, 0.5, 0.75].filter((f) => opaqueAt(img, g, it.x + it.w * f, y)).length;
+          if (hits >= 2) it.invisible = true;
         }
       }
-      if (items.some((it) => it.covered)) {
-        if (items.some((it) => !it.covered && !it.invisible && it.str.trim())) {
-          covered += items.filter((it) => it.covered).length;
-          items = items.filter((it) => !it.covered);
-        } else for (const it of items) it.covered = undefined;
+      // Tekst som en senere tegnet, ugjennomsiktig flate eller et mindre bilde dekker nesten helt (overmaling i en
+      // PDF-redigerer, klistrelapp, sladding), synes ikke i originalen. Den tas ut før oppsettet: den oversettes ikke og
+      // tegnes ikke (tekstoperatoren fjernes, eller står urørt under dekket når den deles med uendret tekst).
+      // Bare det som sikkert dekker, teller: et rett rektangel eller et bilde uten skråstilling, med fast farge (ikke
+      // mønster), helt ugjennomsiktig, uten myk maske eller blandemodus, og ikke klippet til noe annet enn et rektangel
+      // (klippet regnes med), og ikke i et lag med ukjent tilstand. Er det tvil, blir teksten stående. Blir det ingen synlig
+      // tekst igjen på siden, tas ingenting ut.
+      const covers = opts.noCover ? [] : scan.graphics.filter((g) => !big.includes(g) && !g.soft && !g.odd && !g.oc && (g.alpha ?? 1) >= 0.999
+        && (g.image ? !g.mask && !g.skew : g.fill && g.rect && g.parts === 1 && !g.pattern) && g.x1 - g.x0 > 2 && g.y1 - g.y0 > 2);
+      const first = covers.length ? minOf(items, (it) => it.op ?? Infinity) : Infinity;
+      const later = covers.filter((g) => g.op > first);
+      if (later.length) {
+        // Rutenett over siden: et dekke som dekker minst 90 % av tegnrammen, dekker også midten av den, så bare dekkene i
+        // ruten der midten ligger, må sjekkes (i tegnerekkefølge, fra det første som er tegnet etter teksten).
+        const cell = Math.max(24, Math.max(width, height) / 32);
+        const grid = new Map();
+        const wide = [];
+        for (const g of later) {
+          const c0 = Math.floor((g.x0 - x0) / cell);
+          const c1 = Math.floor((g.x1 - x0) / cell);
+          const r0 = Math.floor((g.y0 - y0) / cell);
+          const r1 = Math.floor((g.y1 - y0) / cell);
+          if ((c1 - c0 + 1) * (r1 - r0 + 1) > 256) {
+            wide.push(g);
+            continue;
+          }
+          for (let c = c0; c <= c1; c++) {
+            for (let r = r0; r <= r1; r++) {
+              const key = `${c},${r}`;
+              if (!grid.has(key)) grid.set(key, []);
+              grid.get(key).push(g);
+            }
+          }
+        }
+        const after = (list, op) => {
+          let lo = 0;
+          let hi = list.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (list[mid].op <= op) lo = mid + 1;
+            else hi = mid;
+          }
+          return lo;
+        };
+        for (const it of items) {
+          if (it.invisible || Math.abs(it.angle) >= 0.01 || !it.str.trim() || !(it.w > 0)) continue;
+          const box = { x0: it.x, x1: it.x + it.w, y0: it.y - it.size * 0.2, y1: it.y + it.size * 0.75 };
+          const area = (box.x1 - box.x0) * (box.y1 - box.y0);
+          const key = `${Math.floor(((box.x0 + box.x1) / 2 - x0) / cell)},${Math.floor(((box.y0 + box.y1) / 2 - y0) / cell)}`;
+          const opEnd = it.opEnd ?? it.op;
+          for (const list of [grid.get(key) || [], wide]) {
+            for (let n = after(list, opEnd); n < list.length && !it.covered; n++) {
+              const g = list[n];
+              const w = Math.min(g.x1, box.x1) - Math.max(g.x0, box.x0);
+              const h = Math.min(g.y1, box.y1) - Math.max(g.y0, box.y0);
+              if (w <= 0 || h <= 0 || w * h < 0.9 * area) continue;
+              if (g.image) {
+                // Bilde med gjennomsiktighet: ugjennomsiktig over hele tegnrammen.
+                if (!images.has(g)) images.set(g, await load(g));
+                const img = images.get(g);
+                if (!img) continue;
+                let solid = true;
+                for (const fx of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+                  for (const fy of [0.2, 0.5, 0.8]) {
+                    if (solid && !opaqueAt(img, g, box.x0 + (box.x1 - box.x0) * fx, box.y0 + (box.y1 - box.y0) * fy, 250)) solid = false;
+                  }
+                }
+                if (!solid) continue;
+              }
+              it.covered = true;
+            }
+          }
+        }
+        if (items.some((it) => it.covered)) {
+          if (items.some((it) => !it.covered && !it.invisible && it.str.trim())) {
+            covered += items.filter((it) => it.covered).length;
+            items = items.filter((it) => !it.covered);
+          } else for (const it of items) it.covered = undefined;
+        }
       }
-    }
-    // Usynlig OCR-lag oppå ekte tekst: den synlige teksten gjelder.
-    if (items.some((it) => it.invisible) && items.some((it) => !it.invisible)) {
-      const buckets = new Map();
-      for (const v of items) {
-        if (v.invisible || !v.str.trim()) continue;
-        const key = Math.round(v.y / 4);
-        if (!buckets.has(key)) buckets.set(key, []);
-        buckets.get(key).push(v);
+      // Usynlig OCR-lag oppå ekte tekst: den synlige teksten gjelder.
+      if (items.some((it) => it.invisible) && items.some((it) => !it.invisible)) {
+        const buckets = new Map();
+        for (const v of items) {
+          if (v.invisible || !v.str.trim()) continue;
+          const key = Math.round(v.y / 4);
+          if (!buckets.has(key)) buckets.set(key, []);
+          buckets.get(key).push(v);
+        }
+        const hidden = (it) => [-1, 0, 1].some((d) => (buckets.get(Math.round(it.y / 4) + d) || []).some((v) =>
+          Math.abs(v.y - it.y) < 0.5 * Math.max(v.size, it.size) && v.x < it.x + it.w && v.x + v.w > it.x));
+        items = items.filter((it) => !it.invisible || !hidden(it));
       }
-      const hidden = (it) => [-1, 0, 1].some((d) => (buckets.get(Math.round(it.y / 4) + d) || []).some((v) =>
-        Math.abs(v.y - it.y) < 0.5 * Math.max(v.size, it.size) && v.x < it.x + it.w && v.x + v.w > it.x));
-      items = items.filter((it) => !it.invisible || !hidden(it));
-    }
-    // Dekkfargen bak OCR-tekst trengs bare når PDF-en skrives (ikke ved telling og innsamling av tekst).
-    let bg = null;
-    if (!opts.collect && items.some((it) => it.invisible)) {
-      const scanImage = big.filter((g) => g.id || g.data).sort((a, b) => (b.x1 - b.x0) * (b.y1 - b.y0) - (a.x1 - a.x0) * (a.y1 - a.y0))[0];
-      if (scanImage) bg = backgroundOf(images.has(scanImage) ? images.get(scanImage) : await imageOf(page, scanImage), scanImage);
-    }
-    images.clear();
-    for (const g of scan.graphics) if (g.data) g.data = undefined;
-    // pdf.js leverer de dekodede bildene etter operatorlisten. Kommer et bilde først etter page.cleanup(), blir det
-    // liggende i minnet til hele dokumentet er lest (skannede sider: flere MB per side). Derfor ventes det på sidens
-    // bilder (med en øvre tidsgrense) før siden ryddes.
-    await settleImages(page, scan.imageIds);
-    const result = {
-      view: [x0, y0, x1, y1], width, height, rotate: page.rotate || 0, items, shapes: scan.shapes, graphics: scan.graphics,
-      exact, shows: scan.shows, paths: scan.paths, advances: scan.advances, bg, hiddenOps, formDraws: scan.formDraws, formTextMapped,
-    };
-    // Legges siden ut med én gang, kan grafikken og tegnene slippes før neste side leses (mindre minne).
-    if (opts.onPage) await opts.onPage(result, n - 1);
-    pages.push(result);
-    const marks = new Map();
-    for (const id of scan.imageIds) {
-      if (!id.startsWith("g_")) continue;
-      let mark = null;
-      try {
-        if (page.commonObjs.has(id)) mark = imageMark(page.commonObjs.get(id));
-      } catch {
-        mark = null;
+      // Dekkfargen bak OCR-tekst trengs bare når PDF-en skrives (ikke ved telling og innsamling av tekst).
+      let bg = null;
+      if (!opts.collect && items.some((it) => it.invisible)) {
+        const scanImage = big.filter((g) => g.id || g.data).sort((a, b) => (b.x1 - b.x0) * (b.y1 - b.y0) - (a.x1 - a.x0) * (a.y1 - a.y0))[0];
+        if (scanImage) bg = backgroundOf(images.has(scanImage) ? images.get(scanImage) : await load(scanImage), scanImage);
       }
-      marks.set(id, mark);
+      images.clear();
+      for (const g of scan.graphics) if (g.data) g.data = undefined;
+      // pdf.js leverer de dekodede bildene etter operatorlisten. Kommer et bilde først etter page.cleanup(), blir det
+      // liggende i minnet til hele dokumentet er lest (skannede sider: flere MB per side). Derfor ventes det på sidens
+      // bilder (med en øvre tidsgrense) før siden ryddes.
+      await settleImages(page, scan.imageIds);
+      const result = {
+        view: [x0, y0, x1, y1], width, height, rotate: page.rotate || 0, items, shapes: scan.shapes, graphics: scan.graphics,
+        exact, shows: scan.shows, paths: scan.paths, advances: scan.advances, bg, hiddenOps, formDraws: scan.formDraws,
+      };
+      // Legges siden ut med én gang, kan grafikken og tegnene slippes før neste side leses (mindre minne).
+      if (opts.onPage) await opts.onPage(result, n - 1);
+      pages.push(result);
+      page.cleanup();
+      shared.use(scan.imageIds.filter((id) => !dropped.has(id)), n, needed);
+      const evict = shared.evict(n, (id) => sharedBytes(page, id));
+      if (evict.length && typeof page.commonObjs.delete !== "function") {
+        await pdf.cleanup();
+        shared.reset();
+      } else for (const id of evict) if (page.commonObjs.delete(id)) dropped.add(id);
     }
-    page.cleanup();
-    shared.use([...marks], n);
-    if (typeof pdf.cleanup === "function" && shared.clean(n, (ids) => sharedBytes(page, ids))) await pdf.cleanup();
+  } finally {
+    // De dekodede bildene i fellesbufferen slippes før dokumentet lukkes (ellers blir de liggende til neste PDF åpnes),
+    // også når en side ikke kunne leses.
+    try {
+      if (typeof pdf.cleanup === "function") await pdf.cleanup();
+    } finally {
+      // Nyere pdf.js lukker dokumentet gjennom lastejobben (PDFDocumentProxy har ikke destroy lenger).
+      if (typeof pdf.destroy === "function") await pdf.destroy();
+      else if (pdf.loadingTask && typeof pdf.loadingTask.destroy === "function") await pdf.loadingTask.destroy();
+    }
   }
-  // De dekodede bildene i fellesbufferen slippes før dokumentet lukkes (ellers blir de liggende til neste PDF åpnes).
-  if (typeof pdf.cleanup === "function") await pdf.cleanup();
-  if (typeof pdf.destroy === "function") await pdf.destroy();
   pages.covered = covered;
   return pages;
 }
@@ -1989,7 +2058,8 @@ function linkStacks(blocks, geo, page, floors, obstacles = []) {
     const under = clearUnder(e, blocks, page, floorUnder(e, geo, x0, x1), geo, null, x0, x1);
     const f = under.end ? null : under.below;
     if (!f || f.invisible || f.lines[0].bullet || f.lines[0].listStart || f.drop || f.above || f.leader || f.angle) return null;
-    if (f.box !== e.box || !sameCell(e, f) || e.bottom - f.top > 3 * e.gap || f.left < x0 - 2) return null;
+    // Følgeren begynner under det siste avsnittet (innenfor dets egen bredde), ikke i en nabospalte.
+    if (f.box !== e.box || !sameCell(e, f) || e.bottom - f.top > 3 * e.gap || f.left < x0 - 2 || f.left >= e.right - 1) return null;
     if (f.right > x1 + Math.max(2, 0.1 * (x1 - x0)) && !(f.box && e.box === f.box)) return null;
     if (closing(f, e.bottom - f.top)) return null;
     const unit = units.get(f) || [f];
@@ -2095,8 +2165,8 @@ function roomAbove(b, chain, skip, blocks, geo, obstacles, [x0, x1] = [b.left, b
 
 // Etter oppsettet trengs verken grafikkens kanter, tekstbitene per linje eller stilbitene (de er blitt til segmenter).
 // Ved innsamling av tekst trengs heller ikke tekstbitene og grafikken. Ved skriving trengs bare fyll, bilder og
-// understreking, og for hver blokk bare hvilke tekstoperatorer den består av (b.ops) og om alle er kjent (b.exact);
-// understrekingen vet hvilke blokker den hører til (g.owners).
+// understreking, og for hver blokk bare hvilke tekstoperatorer den består av (b.ops, b.gaps) og om alle er kjent
+// (b.exact); understrekingen vet hvilke blokker den hører til (g.owners).
 function release(page, blocks, collect) {
   page.geo = undefined;
   for (const b of blocks) {
@@ -2105,25 +2175,42 @@ function release(page, blocks, collect) {
       l.items = undefined;
     }
   }
-  // Tekstoperatorene og skjemaobjektene hver blokk består av, trengs også ved innsamling (se freezeForms).
+  // Tekstoperatorene og skjemaobjektene hver blokk består av. Ved innsamling trengs de bare på sider som tegner
+  // skjemaobjekter (se freezeForms: ellers kan ingen tekst der stå urørt).
+  const light = collect && !(page.formDraws && page.formDraws.length);
   const owner = new Map();
   for (const b of blocks) {
+    if (light) {
+      b.ops = b.gaps = b.forms = [];
+      b.items = undefined;
+      if (b.drop) b.drop.items = undefined;
+      continue;
+    }
     const ops = new Set();
+    const gaps = new Map();
     const forms = new Set();
     for (const it of b.items) {
       if (!collect) owner.set(it, b);
-      if (it.sops) for (let n = it.sops[0]; n <= it.sops[1]; n++) ops.add(n);
-      for (const f of it.forms || []) forms.add(f);
+      // En bit uten sikker kobling: hullet den står i (se looseSources).
+      const loose = it.sops ? null : it.loose;
+      if (it.sops) for (let n = Math.max(0, it.sops[0]); n <= it.sops[1]; n++) ops.add(n);
+      else if (loose && loose.page && loose.ops) gaps.set(loose.ops.join(), loose.ops);
+      for (const f of it.forms || (loose && loose.forms) || []) forms.add(f);
     }
+    // Tekstoperatorene i sidens strøm (b.ops) og hullene med operatorer der tekst uten sikker kobling kan stå (b.gaps:
+    // [første, siste]).
     b.ops = [...ops];
-    // Skjemaobjektene blokkens tekst er tegnet i (se scanOps).
+    b.gaps = [...gaps.values()];
+    // Skjemaobjektene blokkens tekst er tegnet i, eller kan være tegnet i (tegnenummer i scan.formDraws).
     b.forms = [...forms];
     b.exact = b.items.every((it) => it.sops && it.sops[0] >= 0);
-    // Tekstoperatorene i sidens egen strøm er kjent (tekst i skjemaobjekter har ingen der).
-    b.keepable = b.items.every((it) => (it.forms && it.forms.length) || (it.sops && it.sops[0] >= 0));
-    // Noe av teksten står i sidens egen strøm (ikke i et skjemaobjekt), og om det er kjent hvor all teksten står.
-    b.pagePart = b.items.some((it) => !(it.forms && it.forms.length));
-    b.formsKnown = page.formTextMapped || b.items.every((it) => it.forms != null);
+    // Det er kjent hvor teksten står, så den kan stå urørt: i et skjemaobjekt eller i kjente tekstoperatorer i sidens
+    // strøm (for en bit uten sikker kobling: operatorene i hullet, eller skjemaobjekter som kan stave den).
+    b.keepable = b.items.every((it) => (it.forms && it.forms.length) || (it.sops && it.sops[0] >= 0)
+      || (!it.sops && it.loose && !it.loose.unknown && (it.loose.page ? Boolean(it.loose.ops) : it.loose.forms.length > 0)));
+    // Noe av teksten står (eller kan stå) i sidens egen strøm, ikke i et skjemaobjekt.
+    b.pagePart = b.items.some((it) => (it.sops ? !(it.forms && it.forms.length)
+      : !it.loose || it.loose.page || it.loose.unknown || !it.loose.forms.length));
     b.items = undefined;
     if (b.drop) b.drop.items = undefined;
   }
@@ -2461,29 +2548,32 @@ function planForms(lib, doc, pages) {
 // hele dokumentet før teksten samles inn, så den verken sendes til oversettelse eller tegnes på nytt (b.frozen), og
 // så et skjemaobjekt bare får teksten fjernet når alt som tegnes fra det, tegnes på nytt:
 // - et skjemaobjekt med tekst i et skjult lag står urørt (planForms);
-// - en blokk med tekst fra et skjemaobjekt som står urørt, står urørt, og det samme gjør blokker som deler
-//   tekstoperatorer med den;
-// - alle skjemaobjektene en urørt blokk har tekst fra, står da urørt (er det ukjent hvilke, alle siden tegner), og
-//   det kan igjen gjøre blokker på andre sider urørte;
-// - har en urørt blokk tekst i sidens egen strøm som ikke kan beholdes (tekstoperatorene kan ikke kobles), står hele
-//   siden urørt (pages[n].frozen): ingen tekst fjernes og ingenting tegnes på nytt der.
+// - en blokk med tekst fra et skjemaobjekt som står urørt, står urørt. For tekst uten sikker kobling (se looseSources)
+//   regnes bare skjemaobjekter som tegnes synlig på siden og har tegn i hullet som kan stave teksten; et vannmerke i et
+//   skjult lag eller et skjema med annen tekst er ikke kilden;
+// - blokker som deler tekstoperatorer (eller et hull med usikker tekst) med en urørt blokk, står også urørt;
+// - alle skjemaobjektene en urørt blokk har (eller kan ha) tekst fra, står da urørt (er det ukjent hvilke, alle siden
+//   når), og det kan igjen gjøre blokker på andre sider urørte;
+// - den delen av en urørt blokk som står i sidens egen strøm, beholdes (tekstoperatorene, se writePdf). Bare når det
+//   er umulig (antallet tekstoperatorer stemmer ikke med det pdf.js så, eller det er ukjent hvor teksten står), står
+//   hele siden urørt (pages[n].frozen): ingen tekst fjernes og ingenting tegnes på nytt der.
 // Returnerer skjemaobjektene som står urørt (nøkler), eller null når ingenting står urørt.
 function freezeForms(lib, doc, pages, blocksPerPage) {
   const forms = planForms(lib, doc, pages);
   const untouched = forms.untouched;
   if (!untouched.size) return null;
-  const textOk = new Map();
+  const showsOk = new Map();
   const matched = (n) => {
-    if (!textOk.has(n)) {
+    if (!showsOk.has(n)) {
       let ok = false;
       try {
-        ok = Boolean(pages[n].exact) && stripText(contentOf(lib, doc.context, doc.getPage(n))).shows === pages[n].shows;
+        ok = stripText(contentOf(lib, doc.context, doc.getPage(n))).shows === pages[n].shows;
       } catch {
         ok = false;
       }
-      textOk.set(n, ok);
+      showsOk.set(n, ok);
     }
-    return textOk.get(n);
+    return showsOk.get(n);
   };
   const add = (keys) => {
     let grew = false;
@@ -2499,10 +2589,10 @@ function freezeForms(lib, doc, pages, blocksPerPage) {
     grew = false;
     blocksPerPage.forEach((blocks, n) => {
       const { refs, all } = forms.pages[n];
-      // Skjemaobjektene blokkens tekst kommer fra (null: ukjent, et av dem siden tegner).
-      const sources = (b) => (refs && b.formsKnown ? b.forms.map((f) => refs[f]) : null);
+      // Skjemaobjektene blokkens tekst kommer (eller kan komme) fra (null: ukjent, et av dem siden når).
+      const sources = (b) => (refs ? b.forms.map((f) => refs[f]) : null);
       const hit = (b) => {
-        if (b.formsKnown && !b.forms.length) return false;
+        if (!b.forms.length) return false;
         const src = sources(b);
         return src ? src.some((k) => k == null || untouched.has(k)) : [...all].some((k) => untouched.has(k));
       };
@@ -2511,12 +2601,20 @@ function freezeForms(lib, doc, pages, blocksPerPage) {
         if (!b.frozen && (pages[n].frozen || hit(b))) b.frozen = changed = true;
       }
       if (!changed) return;
-      const owners = new Map();
-      for (const b of blocks) for (const s of b.ops) owners.set(s, [...(owners.get(s) || []), b]);
       for (let again = true; again;) {
         again = false;
+        const held = new Set();
         for (const b of blocks) {
-          if (!b.frozen && b.ops.some((s) => owners.get(s).some((o) => o.frozen))) b.frozen = again = true;
+          if (!b.frozen) continue;
+          for (const s of b.ops) held.add(s);
+          for (const [lo, hi] of b.gaps) for (let s = lo; s <= hi; s++) held.add(s);
+        }
+        const inGap = ([lo, hi]) => {
+          for (let s = lo; s <= hi; s++) if (held.has(s)) return true;
+          return false;
+        };
+        for (const b of blocks) {
+          if (!b.frozen && (b.ops.some((s) => held.has(s)) || b.gaps.some(inGap))) b.frozen = again = true;
         }
       }
       for (const b of blocks) {
@@ -2525,7 +2623,7 @@ function freezeForms(lib, doc, pages, blocksPerPage) {
         if (b.pagePart && !(b.keepable && matched(n)) && !pages[n].frozen) {
           pages[n].frozen = true;
           for (const o of blocks) o.frozen = true;
-          add(all);
+          add(refs || all);
           grew = true;
         }
       }
@@ -2569,15 +2667,22 @@ function contentOf(lib, context, page) {
 }
 
 // Sidens innhold uten teksten (bortsett fra tekst som beholdes). Stemmer ikke antallet tekst- og maleoperatorer med
-// det pdf.js så, er koblingen usikker: da fjernes all tekst og ingen streker. `cutPaths(textOk)` gir strekene som skal bort.
-function stripPage(lib, doc, page, seen, meta, keep, cutPaths, stripForm) {
+// det pdf.js så, er koblingen usikker: da fjernes all tekst og ingen streker. `cutPaths(stay)` gir strekene som skal bort.
+// Er ikke alle tekstbitene koblet (meta.exact), men antallet tekstoperatorer stemmer, beholdes bare `held`: teksten i
+// blokker som står urørt (se freezeForms).
+function stripPage(lib, doc, page, seen, meta, keep, cutPaths, stripForm, held = null) {
   const { context } = doc;
   const joined = contentOf(lib, context, page);
   const probe = stripText(joined);
   const textOk = meta.exact && probe.shows === meta.shows;
+  const heldOk = !textOk && Boolean(held && held.size) && probe.shows === meta.shows;
   const pathsOk = probe.paints === meta.paths;
-  const result = textOk || pathsOk
-    ? stripText(joined, { keep: textOk ? keep : null, cutPaths: pathsOk ? cutPaths(textOk) : null, advances: textOk ? meta.advances : null })
+  const result = textOk || pathsOk || heldOk
+    ? stripText(joined, {
+      keep: textOk ? keep : heldOk ? held : null,
+      cutPaths: pathsOk ? cutPaths(textOk ? "kept" : heldOk ? "held" : null) : null,
+      advances: textOk || heldOk ? meta.advances : null,
+    })
     : probe;
   const wrapped = Buffer.concat([Buffer.from("q\n"), result.bytes, Buffer.from(`\n${"Q\n".repeat(result.open + 1)}`)]);
   stripForms(lib, context, page.node.Resources(), seen, stripForm);
@@ -3155,8 +3260,13 @@ function stackPlans(plans) {
   const H = (b) => (b.lines.length - 1) * b.gap;
   // Hvor langt en blokk er flyttet ned av sin egen plan (dyOwn) og ved å bli høyere.
   const ownMove = (q) => (q.dyOwn || 0) + (q.lines.length - 1) * q.gap * q.scale - H(q.block);
-  // En følger som er én linje (overskrift, merknad), ikke et avsnitt i en flyt.
-  const heading = (unit) => unit.length === 1 && unit[0].block.lines.length === 1 && !unit[0].block.below;
+  // En følger som er én linje (overskrift, merknad), eller en overskrift over to-tre linjer (fet eller større enn
+  // teksten `base` i flyten over), ikke et avsnitt i en flyt.
+  const heading = (unit, base) => {
+    const b = unit[0].block;
+    if (unit.length !== 1 || b.below) return false;
+    return b.lines.length === 1 || (b.lines.length <= 3 && (b.size > base.size + 0.5 || (b.style.bold && !base.style.bold)));
+  };
   const run = (p) => {
     if (handled.has(p)) return;
     handled.add(p);
@@ -3244,7 +3354,7 @@ function stackPlans(plans) {
         push.push(x);
         const t = unit[unit.length - 1];
         kk = Math.max(kk, unit[0].kindUsed ?? 0);
-        over = x + ownMove(t) - endOf(t.block, heading(unit) ? 0 : kk);
+        over = x + ownMove(t) - endOf(t.block, heading(unit, blocks[n - 1]) ? 0 : kk);
       }
       if (units.length && over > 0.01) {
         if (!measure) return null;
@@ -3404,6 +3514,14 @@ async function writePdf(buffer, pages, blocksPerPage, ctx) {
     const keep = new Set([...kept].flatMap(opsOf));
     // Tekst i et skjult lag står urørt (den er ikke med i noen blokk).
     for (const s of meta.hiddenOps || []) if (!owners.has(s)) keep.add(s);
+    // Er ikke alle tekstbitene koblet, beholdes bare teksten i urørte blokker (og i hullene med usikker tekst de står i).
+    const heldBlocks = new Set([...frozen].filter((b) => b.keepable));
+    const held = new Set();
+    for (const b of heldBlocks) {
+      for (const s of b.ops) held.add(s);
+      for (const [lo, hi] of b.gaps || []) for (let s = lo; s <= hi; s++) held.add(s);
+    }
+    if (held.size) for (const s of meta.hiddenOps || []) if (!owners.has(s)) held.add(s);
     // Understreking under tekst som tegnes på nytt, fjernes og tegnes under oversettelsen (all tekst tegnes på nytt
     // hvis tekstoperatorene ikke kunne kobles).
     // En sti med flere deler fjernes bare når alle delene er understreking under tekst som tegnes på nytt.
@@ -3413,15 +3531,16 @@ async function writePdf(buffer, pages, blocksPerPage, ctx) {
       if (!underlined.has(g.pop)) underlined.set(g.pop, []);
       underlined.get(g.pop).push(g);
     }
-    const cutPaths = (textOk) => new Set([...underlined].filter(([, parts]) => parts.length === parts[0].parts
-      && parts.every((g) => g.owners && (!textOk || g.owners.every((b) => !kept.has(b))))).map(([pop]) => pop));
+    const cutPaths = (stay) => new Set([...underlined].filter(([, parts]) => parts.length === parts[0].parts
+      && parts.every((g) => g.owners && g.owners.every((b) => !(stay === "kept" ? kept : stay === "held" ? heldBlocks : new Set()).has(b))))
+      .map(([pop]) => pop));
     let cover = false;
     let strip = { textOk: false, pathsOk: false, ref: null };
     if (editable && blocks.length) {
       try {
         // Teksten fjernes bare fra skjemaobjekter som tegnes på siden og ikke står urørt.
         const stripForm = (key) => !untouchedForms.has(key) && (!formPage.refs || formPage.refs.includes(key));
-        strip = stripPage(lib, doc, page, seen, meta, keep, cutPaths, stripForm);
+        strip = stripPage(lib, doc, page, seen, meta, keep, cutPaths, stripForm, held);
       } catch (err) {
         cover = true;
         warn("pdf_cover", `Side ${n + 1}: den opprinnelige teksten kunne ikke fjernes (${err.message}); oversettelsen er lagt over med hvit bakgrunn.`);
@@ -3640,6 +3759,8 @@ async function readPdf(buffer, collect, noCover) {
     }
     if (doc) pages.untouched = freezeForms(lib, doc, pages, blocksPerPage) || undefined;
   }
+  // Ved innsamling trengs ikke tekstoperatorene lenger.
+  if (collect) for (const b of blocksPerPage.flat()) b.ops = b.gaps = b.forms = undefined;
   const segments = blocksPerPage.flat().flatMap((b) => b.segments);
   for (const s of segments) s.source = s.text;
   // Et avsnitt delt over spalter eller sider oversettes som én setning og deles etterpå. En kjede (spalte 1 → 2 → 3)

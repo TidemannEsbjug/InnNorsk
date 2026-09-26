@@ -1242,32 +1242,99 @@ test("PDF: et BDC som ikke lukkes inne i et skjemaobjekt, skjuler ikke teksten p
   assert.ok((await textItems(buffer)).some((i) => /NB VISIBLE SENTENCE/.test(i.str)));
 });
 
-test("PDF: fellesbufferen for bilder tømmes ikke for bilder som går igjen annenhver side eller med noen siders mellomrom, men for bilder som ikke brukes igjen", () => {
+// Simulerer pdf.js: et bilde som bare er brukt på én side så langt, dekodes for siden (og slippes etter den); fra andre
+// side det brukes på, dekodes det én gang til fellesbufferen (g_-id), og etter det sender arbeideren det aldri igjen,
+// heller ikke når hovedtråden har sluppet det. Gir største plass ved sidens slutt (før opprydding), plass etter
+// oppryddingen og antall dekodinger.
+function simulateSharedImages(pages, MB = 26e6, neededOf = () => []) {
   const { sharedImagePolicy } = require("../src/formats/pdf");
-  const MB = 26e6;
-  const run = (pages) => {
-    const policy = sharedImagePolicy();
-    const decoded = new Map();
-    let cleanups = 0;
-    pages.forEach((marks, n) => {
-      // pdf.js gir et bilde en ny id når det dekodes på nytt etter en tømming.
-      const used = marks.map((m) => [decoded.get(m) || `g_${m}_${n}`, m]);
-      for (const [id, m] of used) decoded.set(m, id);
-      policy.use(used, n);
-      const bytes = (ids) => ids.length * MB;
-      if (policy.clean(n, bytes)) {
-        cleanups++;
-        decoded.clear();
+  const policy = sharedImagePolicy();
+  const uses = new Map();
+  const worker = new Set();
+  const held = new Set();
+  let decodes = 0;
+  let peak = 0;
+  let after = 0;
+  pages.forEach((images, n) => {
+    let local = 0;
+    for (const m of images) {
+      uses.set(m, (uses.get(m) || 0) + 1);
+      if (uses.get(m) < 2) {
+        local++;
+        decodes++;
+      } else if (!worker.has(m)) {
+        worker.add(m);
+        held.add(m);
+        decodes++;
       }
-    });
-    return cleanups;
-  };
-  // A/B annenhver side (venstre/høyre bakgrunn): aldri.
-  assert.equal(run(Array.from({ length: 30 }, (_, n) => [n % 2 ? "B" : "A"])), 0);
-  // Lysbildeoppsett: innhold, og et skilleark hver fjerde side, tittel først: høyst én tømming.
-  assert.ok(run(Array.from({ length: 40 }, (_, n) => [n === 0 ? "T" : n % 4 === 0 ? "S" : "C"])) <= 1);
-  // Nye bilder (hvert brukt på to sider etter hverandre): tømmes, så minnet ikke vokser.
-  assert.ok(run(Array.from({ length: 30 }, (_, n) => [`P${n >> 1}`])) >= 5);
+    }
+    peak = Math.max(peak, (held.size + local) * MB);
+    const needed = new Set(neededOf(images).filter((m) => held.has(m)).map((m) => `g_${m}`));
+    policy.use(images.filter((m) => held.has(m)).map((m) => `g_${m}`), n, needed);
+    for (const id of policy.evict(n, (id) => (held.has(id.slice(2)) ? MB : 0))) held.delete(id.slice(2));
+    // Aldri mer enn 48 MB igjen, bortsett fra bilder siden trengte pikslene til (de blir liggende).
+    for (const id of needed) assert.ok(held.has(id.slice(2)), `side ${n}: ${id} ble sluppet`);
+    assert.ok(held.size * MB <= Math.max(48e6, needed.size * MB), `side ${n}: ${held.size} bilder igjen`);
+    after = Math.max(after, held.size * MB);
+  });
+  return { peak, after, decodes, distinct: uses.size };
+}
+
+test("PDF: bilder i fellesbufferen slippes eldste først til de tar høyst 48 MB (sidens egne regnes med), og et sluppet bilde dekodes ikke på nytt", () => {
+  const MB = 26e6;
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32);
+  const cases = [
+    // A/B annenhver side (venstre/høyre bakgrunn), seks bakgrunner i tilfeldig rekkefølge, et «navbilde» annenhver side,
+    // grupper på tre sider, lysbildeoppsett, samme bakgrunn på hver side pluss ett av fem bilder, og sider med to av åtte.
+    { pages: Array.from({ length: 30 }, (_, n) => [n % 2 ? "B" : "A"]), peak: 2 },
+    { pages: Array.from({ length: 60 }, () => [String(Math.floor(rnd() * 6))]), peak: 2 },
+    { pages: Array.from({ length: 80 }, (_, n) => [n % 2 ? "H" : String((n >> 1) % 7)]), peak: 2 },
+    { pages: Array.from({ length: 60 }, (_, n) => [`G${Math.floor(n / 3)}`]), peak: 2 },
+    { pages: Array.from({ length: 40 }, (_, n) => [n === 0 ? "T" : n % 4 === 0 ? "S" : "C"]), peak: 2 },
+    { pages: Array.from({ length: 40 }, () => ["BG", `P${Math.floor(rnd() * 5)}`]), peak: 2 },
+    { pages: Array.from({ length: 60 }, () => [...new Set([String(Math.floor(rnd() * 8)), String(Math.floor(rnd() * 8))])]), peak: 3 },
+    // Skannede sider der pikslene trengs (tekst under bildene): de blir liggende, også over grensen.
+    { pages: Array.from({ length: 30 }, (_, n) => [`S${n % 3}`, `T${n % 2}`]), peak: 3, needed: (images) => images },
+  ];
+  for (const { pages, peak, needed } of cases) {
+    const r = simulateSharedImages(pages, MB, needed);
+    assert.ok(r.peak <= peak * MB, `høyst ${peak} bilder: ${r.peak / MB}`);
+    // Hvert bilde dekodes høyst to ganger (for siden, og til fellesbufferen), uansett hvor ofte det går igjen.
+    assert.ok(r.decodes <= 2 * r.distinct, `dekodinger ${r.decodes} for ${r.distinct} bilder`);
+  }
+});
+
+test("PDF: trengs pikslene til et bilde som er sluppet, leses siden på nytt – tekst under et gjennomsiktig bilde forblir synlig, uten ventetid", async () => {
+  const zlib = require("zlib");
+  // To bilder (A og B) over hele siden, gjennomsiktige (SMask 0), tegnet etter teksten, annenhver side: A B A B A. Med en
+  // liten grense slippes A etter side 4, og side 5 trenger pikslene til A (dekker bildet teksten?).
+  const img = (rgb) => ({ dict: `<< /Type /XObject /Subtype /Image /Width 100 /Height 100 /ColorSpace /DeviceRGB /BitsPerComponent 8 /SMask 9 0 R /Filter /FlateDecode /Length %L >>`, data: zlib.deflateSync(Buffer.alloc(100 * 100 * 3, rgb)) });
+  const mask = zlib.deflateSync(Buffer.alloc(100 * 100, 0));
+  const pageObj = (content) => `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents ${content} 0 R /Resources << /Font << /F1 3 0 R >> /XObject << /A 7 0 R /B 8 0 R >> >> >>`;
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R] /Count 5 >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    null, null, null,
+    img(40), img(90),
+    { dict: `<< /Type /XObject /Subtype /Image /Width 100 /Height 100 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${mask.length} >>`, data: mask },
+  ];
+  for (let k = 0; k < 5; k++) objs.push(pageObj(15 + k));
+  for (let k = 0; k < 5; k++) objs.push(streamObj(`BT /F1 11 Tf 72 700 Td (Text on page ${k + 1} under the picture.) Tj ET q 595 0 0 842 0 0 cm /${k % 2 ? "B" : "A"} Do Q`));
+  objs[3] = streamObj("");
+  objs[4] = streamObj("");
+  objs[5] = streamObj("");
+  for (const o of objs) if (o && o.dict) o.dict = o.dict.replace("%L", String(o.data.length));
+  const pdf = pdfFromObjects(objs);
+  const t0 = Date.now();
+  const tight = await extractPages(pdf, { sharedImages: 50e3 });
+  const ms = Date.now() - t0;
+  const normal = await extractPages(pdf);
+  const view = (pages) => pages.map((p) => p.items.filter((i) => i.str.trim()).map((i) => [i.str, Boolean(i.invisible)]));
+  assert.deepEqual(view(tight), view(normal));
+  for (const p of view(tight)) assert.deepEqual(p.map((i) => i[1]), [false]);
+  assert.ok(ms < 5000, `${ms} ms`);
 });
 
 // ---- Runde 7: følgere i flere ledd, overskrifter beholder luften mot innholdet sitt, alle lovlige oppsett i en
@@ -1451,29 +1518,121 @@ async function formStreamOf(buf, name) {
   return Buffer.from(fm instanceof lib.PDFRawStream ? lib.decodePDFRawStream(fm).decode() : fm.getContents()).toString("latin1");
 }
 
-test("PDF: fellesbufferen for bilder holder aldri mer enn 48 MB utover bildene siden selv bruker, og grensen dobles høyst til 64 MB", () => {
-  const { sharedImagePolicy } = require("../src/formats/pdf");
-  const MB = 26e6;
-  let seed = 7;
-  const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32);
-  const sequences = [
-    // Seks bakgrunner i tilfeldig rekkefølge, sju bilder rundt et «navbilde» annenhver side, grupper på tre sider, og
-    // sider med to bilder.
-    Array.from({ length: 60 }, () => [String(Math.floor(rnd() * 6))]),
-    Array.from({ length: 80 }, (_, n) => [n % 2 ? "H" : String((n >> 1) % 7)]),
-    Array.from({ length: 60 }, (_, n) => [`G${Math.floor(n / 3)}`]),
-    Array.from({ length: 60 }, () => [...new Set([String(Math.floor(rnd() * 8)), String(Math.floor(rnd() * 8))])]),
-  ];
-  for (const pages of sequences) {
-    const policy = sharedImagePolicy();
-    const decoded = new Map();
-    pages.forEach((marks, n) => {
-      const used = marks.map((m) => [decoded.get(m) || `g_${m}_${n}`, m]);
-      for (const [id, m] of used) decoded.set(m, id);
-      policy.use(used, n);
-      if (policy.clean(n, (ids) => ids.length * MB)) decoded.clear();
-      assert.ok(decoded.size * MB <= 48e6 + marks.length * MB, `side ${n}: ${decoded.size} bilder igjen`);
-      assert.ok(policy.limit <= 64e6, `grense ${policy.limit}`);
-    });
+// ---- Runde 8: enkeltlinjer vokser ikke over et spaltemellomrom, urørte skjemaobjekter uten å fryse hele sider,
+// overskrifter over to linjer, lagvilkår med ukjente grupper ----
+
+test("PDF: en tekstbit uten sikker kobling fryser ikke hele siden – topptekst og brødtekst oversettes, vannmerket i et skjult lag står urørt og samles ikke inn", async () => {
+  const FH = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [65 /afii57664 /afii57665 /afii57666 /afii57667 /afii57668] >> >>";
+  const OFF = "/OCProperties << /OCGs [7 0 R] /D << /ON [] /OFF [7 0 R] /Order [7 0 R] >> >>";
+  const T = (f, s, x, y, t) => `BT /${f} ${s} Tf ${x} ${y} Td (${t}) Tj ET`;
+  // Topptekst i skjemaobjektet H, vannmerke i W (lag som er av).
+  const page = (content) => pdfFromObjects([
+    `<< /Type /Catalog /Pages 2 0 R ${OFF} >>`, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /FH 6 0 R >> /XObject << /H 8 0 R /W 9 0 R >> >> >>",
+    st(content.join("\n")), HELV, FH, "<< /Type /OCG /Name (Watermark) >>",
+    st(T("F1", 9, 0, 10, "Harbour association annual report 2025"), "/Type /XObject /Subtype /Form /BBox [0 0 400 30] /Resources << /Font << /F1 5 0 R >> >>"),
+    st(`0.5 g ${T("F1", 40, 10, 15, "DRAFT COPY")}`, "/Type /XObject /Subtype /Form /BBox [0 0 400 60] /Resources << /Font << /F1 5 0 R >> >> /OC 7 0 R"),
+  ]);
+  const BODY = [T("F1", 11, 72, 760, "The harbour association held its annual meeting in March."), T("F1", 11, 72, 746, "The board presented the accounts for the previous year.")];
+  const HEAD = "q 1 0 0 1 72 790 cm /H Do Q";
+  const LAST = T("F1", 11, 72, 640, "Membership grew by twelve per cent during the year.");
+  const WM = "q 1 0 0 1 150 400 cm /W Do Q";
+  const cases = {
+    // Tekst utenfor siden (tas ikke med av pdf.js) rett før toppteksten.
+    slug: [...BODY, T("F1", 7, 72, -30, "Job 4711 harbour-report.indd"), HEAD, LAST, WM],
+    // Høyre-til-venstre-linje først (pdf.js snur den).
+    rtl: [T("FH", 11, 72, 820, "ABCDE"), ...BODY, HEAD, LAST, WM],
+    // Høyre-til-venstre-linje rett før vannmerket: vannmerket kobles ikke, men bare skjulte tegn kan stave det.
+    rtlBeforeWatermark: [...BODY, HEAD, T("FH", 11, 72, 700, "ABCDE"), WM, LAST],
+  };
+  for (const [name, content] of Object.entries(cases)) {
+    const pdf = page(content);
+    const res = await applyWith(pdf, upper);
+    assert.ok(res.strings.includes("Harbour association annual report 2025"), `${name} ${JSON.stringify(res.strings)}`);
+    assert.ok(!res.strings.some((s) => /DRAFT/.test(s)), `${name} ${JSON.stringify(res.strings)}`);
+    assert.ok(!res.warnings.some((w) => w.code === "pdf_hidden_layer"), name);
+    const out = (await textItems(res.buffer)).map((i) => i.str);
+    assert.equal(out.filter((s) => /Harbour association annual/i.test(s)).length, 1, `${name} ${JSON.stringify(out)}`);
+    assert.ok(out.includes("NB HARBOUR ASSOCIATION ANNUAL REPORT 2025") && out.includes("NB MEMBERSHIP GREW BY TWELVE PER CENT DURING THE YEAR."), `${name} ${JSON.stringify(out)}`);
+    assert.ok(!out.some((s) => /DRAFT/.test(s)), `${name} ${JSON.stringify(out)}`);
+    assert.match(await formStreamOf(res.buffer, "W"), /\(DRAFT COPY\) Tj/, name);
+  }
+});
+
+test("PDF: kan tekst fra et urørt skjemaobjekt ikke kobles, står bare den usikre delen av siden urørt – andre sider og skjemaobjekter oversettes", async () => {
+  const OFF = "/OCProperties << /OCGs [7 0 R] /D << /ON [] /OFF [7 0 R] /Order [7 0 R] >> >>";
+  const T = (f, s, x, y, t) => `BT /${f} ${s} Tf ${x} ${y} Td (${t}) Tj ET`;
+  const res = "<< /Font << /F1 5 0 R /FH 6 0 R >> /XObject << /F 8 0 R /U 9 0 R >> /Properties << /off 7 0 R >> >>";
+  // Side 2: høyre-til-venstre-linje først (ingen tekst på siden kobles), og en linje med tekst fra U (synlig tekst og
+  // tekst i et skjult lag). F (topptekst) tegnes bare på side 1.
+  const pdf = pdfFromObjects([
+    `<< /Type /Catalog /Pages 2 0 R ${OFF} >>`, "<< /Type /Pages /Kids [3 0 R 10 0 R] /Count 2 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources ${res} >>`,
+    st([T("F1", 11, 72, 780, "Page one has ordinary body text at the top."), "q 1 0 0 1 72 700 cm /F Do Q", T("F1", 11, 72, 640, "Page one closing sentence is translated.")].join("\n")),
+    HELV,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [65 /afii57664 /afii57665 /afii57666 /afii57667 /afii57668] >> >>",
+    "<< /Type /OCG /Name (Layer) >>",
+    st(T("F1", 11, 0, 10, "Company header sentence shown inside the form."), "/Type /XObject /Subtype /Form /BBox [0 0 450 40] /Resources << /Font << /F1 5 0 R >> >>"),
+    st(`${T("F1", 11, 0, 0, "the annual budget")} /OC /off BDC ${T("F1", 8, 0, -12, "hidden remark")} EMC`,
+      "/Type /XObject /Subtype /Form /BBox [0 -20 400 40] /Resources << /Font << /F1 5 0 R >> /Properties << /off 7 0 R >> >>"),
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 11 0 R /Resources ${res} >>`,
+    st([T("FH", 11, 72, 790, "ABCDE"), T("F1", 11, 72, 760, "Page two has ordinary body text at the top."), T("F1", 11, 72, 700, "Reference:"),
+      "q 1 0 0 1 130 700 cm /U Do Q", T("F1", 11, 72, 640, "Page two closing sentence.")].join("\n")),
+  ]);
+  const r = await applyWith(pdf, upper);
+  assert.ok(r.strings.includes("Company header sentence shown inside the form."), JSON.stringify(r.strings));
+  assert.ok(!r.strings.some((s) => /annual budget|hidden/.test(s)), JSON.stringify(r.strings));
+  const p1 = (await textItems(r.buffer, 0)).map((i) => i.str);
+  assert.ok(p1.includes("NB COMPANY HEADER SENTENCE SHOWN INSIDE THE FORM."), JSON.stringify(p1));
+  // Side 2: ingenting dobbelt eller borte.
+  const words = (list) => list.join(" ").split(/\s+/).filter((w) => w && w !== "NB").map((w) => w.toLowerCase()).sort();
+  const before = (await textItems(pdf, 1)).map((i) => i.str);
+  const after = (await textItems(r.buffer, 1)).map((i) => i.str);
+  assert.deepEqual(words(after), words(before));
+  assert.ok(r.warnings.some((w) => w.code === "pdf_hidden_layer"));
+});
+
+test("PDF: en overskrift over to linjer beholder luften mot innholdet sitt når flyten over skyver den", async () => {
+  const pdf = pdfOf([[
+    line("F1", 11, 72, 760, "The harbour association held its annual meeting in March and the"),
+    line("F1", 11, 72, 746, "board presented the accounts for the previous year to members."),
+    line("F1", 11, 72, 724, "Membership grew by twelve per cent, mostly among young families"),
+    line("F1", 11, 72, 710, "who moved to the area during the last two years."),
+    line("F2", 13, 72, 680, "Plans for the new pier and the ferry terminal"),
+    line("F2", 13, 72, 664, "in the coming season"),
+    line("F1", 11, 72, 640, "The new pier will be built in two phases next year"),
+    line("F1", 11, 72, 626, "and the deck will be finished in the autumn."),
+    "0.5 w 72 572 m 520 572 l S",
+    line("F1", 11, 72, 550, "Text under the rule stays where it is."),
+  ].join("\n")]);
+  const res = await applyWith(pdf, (s) => (/^(The harbour|Membership)/.test(s) ? `${s} ${s.slice(0, 40)}` : s.replace(/e/g, "é")));
+  const items = await textItems(res.buffer);
+  const at = (re) => items.find((i) => re.test(i.str));
+  assert.deepEqual(overlaps(items), []);
+  assert.ok(at(/^Plans/).y < 680, "overskriften er skjøvet ned");
+  assert.ok(Math.abs(at(/^in thé coming/).y - at(/^Thé néw piér/).y - 24) < 0.05, `${at(/^in thé coming/).y} ${at(/^Thé néw piér/).y}`);
+});
+
+test("PDF: lagvilkår (/VE) med en gruppe som ikke finnes i /OCGs – er en kjent gruppe i uttrykket av, regnes laget som av", async () => {
+  const KEEP = "BT /F1 11 Tf 72 780 Td (This first line is always visible on the page.) Tj ET";
+  // Gruppe 7 er av, 8 er på, 10 finnes ikke i /OCGs.
+  const make = (ve) => pdfFromObjects([
+    "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [7 0 R 8 0 R] /D << /ON [8 0 R] /OFF [7 0 R] /Order [7 0 R 8 0 R] >> >> >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> /XObject << /Fm 6 0 R >> >> >>",
+    st([KEEP, "q 1 0 0 1 72 700 cm /Fm Do Q"].join("\n")), HELV,
+    st("BT /F1 11 Tf 0 10 Td (Conditional sentence in the form object.) Tj ET", "/Type /XObject /Subtype /Form /BBox [0 0 400 30] /Resources << /Font << /F1 5 0 R >> >> /OC 9 0 R"),
+    "<< /Type /OCG /Name (Off) >>", "<< /Type /OCG /Name (On) >>",
+    `<< /Type /OCMD /VE ${ve} >>`, "<< /Type /OCG /Name (Stray) >>",
+  ]);
+  for (const ve of ["[/And 10 0 R 7 0 R]", "[/Or 10 0 R 7 0 R]", "[/And 10 0 R [/Not 8 0 R]]"]) {
+    const res = await applyWith(make(ve), upper);
+    assert.deepEqual(res.strings, ["This first line is always visible on the page."], ve);
+    assert.match(await formStreamOf(res.buffer, "Fm"), /\(Conditional sentence in the form object\.\) Tj/, ve);
+  }
+  // Or med en gruppe som er på, er på; bare ukjente grupper: ukjent (synlig, oversettes).
+  for (const ve of ["[/Or 10 0 R 8 0 R]", "[/Not 10 0 R]"]) {
+    const res = await applyWith(make(ve), upper);
+    assert.ok(res.strings.some((s) => /^Conditional/.test(s)), ve);
   }
 });

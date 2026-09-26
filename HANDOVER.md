@@ -1,20 +1,19 @@
 # Overlevering — status
 
-**Beslutning:** Alt på Cloudflare **Workers Paid ($5/mnd)**. Svetlana laster opp på nettsiden, oversettelsen skjer automatisk i Cloudflare (Workflow → xAI API), resultatet ligger under «Mine filer». Eieren ser logger og alle filer i admin.
+**I drift:** https://oversetter.tidemann.workers.dev (Cloudflare Workers Paid, Worker `oversetter`, Workflow `oversetter-translate`, D1 `innnorsk`, R2 `innnorsk-files`, migrasjon 0001–0004). Brukere: Svetlana (user) og Achilles (admin). Secrets `XAI_API_KEY` og `SALT_PEPPER` er satt. Modell: `grok-4.20-0309-non-reasoning` (uten resonnering, med priser, så admin viser kostnad).
 
-## Ferdig og testet (`npm test`: 75/75, bare mot falsk xAI/APNs; integrasjonstestene trenger `pip install python-docx`)
-- Kjerne (`src/`): robust Grok-klient, formatbevarende uttrekk/innsetting, PDF med ekte fontnavn.
-- Worker (`worker/`): innlogging, sendinger, Workflow-oversettelse med R2-cache per batch, estimat ved opplasting og live ETA, `grok_calls` med tokens/kostnad, admin, cron.
-- Web (`web/`): varmt design, «Oversett til norsk», «Mine filer», admin med xAI-kort og Grok-kall per fil.
-- Tak mot uventet forbruk (`worker/quota.js`): tegn til xAI per døgn / 30 dager og samlet lagring; se [docs/DEPLOY.md](docs/DEPLOY.md#tak-mot-uventet-regning).
-- **Deployet** 2026-09-25 til **https://oversetter.tidemann.workers.dev** (Worker `oversetter`, Workflow `oversetter-translate`): D1 `innnorsk`, R2 `innnorsk-files`, migrasjon 0001–0003.
-- Dokumentasjon: [CLAUDE.md](CLAUDE.md), [README.md](README.md), [docs/DEPLOY.md](docs/DEPLOY.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+## Ferdig og testet (`npm test`: 192/192 mot falsk xAI/APNs; integrasjonstestene trenger `pip install python-docx`)
+- **Samme filtype og oppsett ut som inn:** Word, PowerPoint, Excel, tekst — og nå **PDF → PDF** (`src/formats/pdf.js`: teksten byttes på stedet, grafikk/bilder/tabeller/farger beholdes; uendret tekst beholder originale glyfer) og **RTF → RTF** (`src/formats/rtf.js`). Herdet i åtte runder mot et testsett av PDF-er fra Word/LibreOffice, Chrome, pdf-lib, spalter, brev/skjema, lysbilder, kyrillisk, skannet med OCR, låst og rotert, med uavhengig kontroll hver runde.
+- **Eieren ser alt:** slettede sendinger beholdes i 30 dager for admin (`RETAIN_DELETED_DAYS`), nettleserens hendelser (side åpnet, filer avvist, feilmeldinger hun så), aktivitetskort, loggfilter per bruker og tidslinje per sending.
+- **Tak mot uventet regning** (`worker/quota.js`): tegn til xAI per døgn / 30 dager og samlet lagring; se [docs/DEPLOY.md](docs/DEPLOY.md#tak-mot-uventet-regning).
+- **Robust Workflow:** batchplanen lagres i R2 (`work/<fil>/plan.json`), så en deploy midt i en oversettelse ikke velter den.
+- Nettsiden heter «Oversetter», lyst blått design, norsk UI.
 
-## Gjenstår
-1. **Secrets og brukere** (eieren kjører selv, se [docs/DEPLOY.md](docs/DEPLOY.md)): `XAI_API_KEY`, `SALT_PEPPER`, `make-user` for eier og Svetlana.
-2. **Roter xAI-nøkkelen** — den gamle ble limt inn i en chat. Bruk en ny i `wrangler secret put XAI_API_KEY`.
-3. **Kostnadsvarsler:** Cloudflare «Usage Based Billing»-varsel og xAI forhåndsbetalte kreditter uten automatisk påfyll.
-4. Første ekte test: Admin → Test API-tilkobling, deretter én liten .docx som Svetlana.
-5. Valgfritt: `ios/` (push-app, ikke kompilert her) og priser i `XAI_PRICE_*` for kostnadsvisning.
+## Kjente begrensninger (PDF)
+- Standardskrifter (Helvetica/Times/Courier) i stedet for originalens skrift der teksten er oversatt; tegn utenfor WinAnsi (kyrillisk i oversatt tekst) translittereres.
+- Låste (krypterte) PDF-er får en ny PDF med teksten på plass, men uten grafikk.
+- Sjeldent: i to spalter kan en enkelt linje som vokser mye legge seg inntil nabospalten når den er tom i samme høyde (en spaltegrense ble prøvd i runde 8, men ga forverringer på vanlige lysbilder og ble tatt ut).
 
-Ikke verifisert mot ekte Cloudflare/xAI (miljøet der dette ble bygget hadde ikke nettilgang dit): feilmeldingsformatet fra Workflows i produksjon og faktisk ytelse.
+## Gjenstår (valgfritt)
+1. **Kostnadsvarsler:** Cloudflare «Usage Based Billing»-varsel og xAI forhåndsbetalte kreditter uten automatisk påfyll.
+2. `ios/` (push-app, ikke kompilert her).
