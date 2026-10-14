@@ -104,6 +104,29 @@
       <div class="notice notice-error" id="mine-error" role="alert" hidden></div>
       <div id="groups"><p class="muted">Henter filene dine …</p></div>
     </section>
+
+    <section class="card rise fildropp" id="fildropp" aria-labelledby="fildropp-title">
+      <h2 class="card-title" id="fildropp-title">Fildropp</h2>
+      <p class="muted">Ble noe ikke riktig? Send filen rett til <span id="fildropp-to">oversetteren</span>, som kan se på hva som gikk galt. Alle filtyper går, også bilder og skjermbilder.</p>
+      <div class="drop drop-small" id="fildropp-drop">
+        <p class="drop-title">Slipp filer her</p>
+        <div class="drop-buttons">
+          <button type="button" class="btn btn-secondary" id="fildropp-pick">Velg filer</button>
+        </div>
+      </div>
+      <input type="file" id="fildropp-input" class="visually-hidden" tabindex="-1" aria-hidden="true" multiple />
+      <ul class="queue" id="fildropp-queue" aria-label="Filene som skal sendes"></ul>
+      <div class="fildropp-more" id="fildropp-more" hidden>
+        <div class="field">
+          <label for="fildropp-note">Hva er galt? (valgfritt)</label>
+          <textarea id="fildropp-note" rows="2" maxlength="2000" placeholder="For eksempel: Tabellen på side 2 forsvant."></textarea>
+        </div>
+        <button type="button" class="btn btn-primary" id="fildropp-send" disabled>Send</button>
+      </div>
+      <div class="notice notice-error" id="fildropp-error" role="alert" hidden></div>
+      <p class="fildropp-done" id="fildropp-done" role="status" hidden></p>
+      <div id="fildropp-history"></div>
+    </section>
     <p class="visually-hidden" id="announce" aria-live="polite"></p>
   </main>
 

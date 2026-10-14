@@ -21,8 +21,10 @@ async function charsUsed(env, windowMs) {
   return (await one(env, `SELECT (${USED_SQL}) AS n`, isoAgo(windowMs))).n;
 }
 
-// Alt som fortsatt ligger i R2 (originaler og oversettelser), også det Svetlana har slettet, til cron sletter det for godt.
-const STORED_SQL = "SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) AS n FROM files WHERE purged_at IS NULL";
+// Alt som fortsatt ligger i R2 (originaler og oversettelser), også det Svetlana har slettet, til cron sletter det for godt,
+// og fildroppet til eieren sletter det.
+const STORED_SQL = `SELECT (SELECT COALESCE(SUM(bytes), 0) + COALESCE(SUM(output_bytes), 0) FROM files WHERE purged_at IS NULL)
+  + (SELECT COALESCE(SUM(bytes), 0) FROM drop_files WHERE deleted_at IS NULL) AS n`;
 
 // { day, month, storage }: { used, cap } for admin-oversikten (tegn og byte).
 export async function quotaStatus(env) {

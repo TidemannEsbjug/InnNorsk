@@ -39,8 +39,9 @@ worker/                   Cloudflare Worker (ESM, Hono)
   auth.js                 PBKDF2-bevis fra klienten + SHA-256 på server, økter, sperre, CSRF
   log.js cron.js apns.js  hendelser (D1 + konsoll-JSON), opprydding/avstemming, valgfri iPhone-push
   quota.js                tak mot uventet forbruk: tegn til xAI per døgn/30 dager (quota_usage), samlet lagring
-  routes/                 auth, sendings, admin, clientlog
-migrations/               D1: 0001_init.sql, 0002_cloud_translate.sql, 0003_quota.sql, 0004_retention_activity.sql (endre aldri en migrasjon som er kjørt)
+  dropbox.js              fildropp: Svetlana sender hvilke som helst filer rett til eieren (R2 drop/<drop>/<fil>)
+  routes/                 auth, sendings, admin, clientlog, dropbox
+migrations/               D1: 0001_init.sql, 0002_cloud_translate.sql, 0003_quota.sql, 0004_retention_activity.sql, 0005_dropbox.sql (endre aldri en migrasjon som er kjørt)
 web/                      Statisk UI (login, index, admin), vanilla JS, ingen byggesteg
 scripts/make-user.js      oppretter/endrer brukere lokalt → wrangler d1 execute (passordet forlater aldri maskinen)
 ios/                      valgfri SwiftUI-app for eierens push-varsler (ikke kompilert i CI)
@@ -79,6 +80,7 @@ Deploy: se [docs/DEPLOY.md](docs/DEPLOY.md).
 - Alle ikke-GET `/api/*` krever headeren `X-InnNorsk: 1`.
 - Sletting fra Svetlana er myk: filene blir liggende i R2 i `RETAIN_DELETED_DAYS` (30) så eieren kan se/laste ned dem (Admin → Sendinger, `?all=1`); cron renser etterpå (`purged_at`). Lagringstaket teller alt som ikke er renset. Nettleserens hendelser (`client.page`, `client.file_rejected`, `client.upload_failed`, `client.error_shown`) går via `/api/client-log` (60/min per økt, 120/min per bruker).
 - Opplasting er rå `PUT /api/sendings/:id/files?path=<encodeURIComponent>` med Content-Length. Maks 25 MB (Worker-minne 128 MB; filen analyseres i minnet).
+- Fildropp (nederst på forsiden, `web/js/fildropp.js`): `POST /api/dropbox` → `PUT /api/dropbox/:id/files?path=` (alle filtyper, maks 100 MB, strømmes til R2 uten analyse) → `POST /api/dropbox/:id/send` (melding + push). Eieren ser dem under Admin → Fildropp og sletter dem selv (ingen cron); de teller i lagringstaket. Hovedslippsonen i `app.js` ignorerer slipp inne i `#fildropp`.
 - Lokal `wrangler dev` kan ikke HTTP/2 til APNs → tester bruker `mock-apns.js`. Sandbox- vs produksjons-token må matche `APNS_ENV`/enhetens env.
 - `database_id` i `wrangler.jsonc` må fylles inn etter `wrangler d1 create innnorsk`.
 - Windows-appen er usignert → SmartScreen «Mer info → Kjør likevel».

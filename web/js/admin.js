@@ -1,7 +1,7 @@
 import {
   api, upload, h, fill, icon, extBadge, dirName, baseName, plural, formatBytes, formatClock, formatDuration, formatNumber,
   formatSeconds, formatWhen, relativeTime, LANGUAGE_LABELS, confirmDialog, toast, logout, reportErrors, initMenu, newSaltedProof,
-  describeAgent,
+  describeAgent, onNewVersion,
 } from "./api.js";
 
 reportErrors();
@@ -115,6 +115,7 @@ function generatePassword(length = 14) {
 const TABS = {
   oversikt: { load: loadOverview, every: 10000 },
   sendinger: { load: loadSendings, every: 10000 },
+  fildropp: { load: loadDrops, every: 30000 },
   logg: { load: loadLog, auto: mergeLog, every: 5000 },
   okter: { load: loadSessions },
   brukere: { load: loadUsers },
@@ -164,6 +165,11 @@ document.querySelector(".tabs").addEventListener("keydown", (e) => {
 });
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) load(true);
+});
+
+// Ny versjon ute: last inn på nytt når ingen dialog er åpen og man ikke skriver.
+onNewVersion(() => {
+  if (!busyTyping() && !document.querySelector("dialog[open]") && ![...replyDrafts.values()].some((v) => v.trim())) location.reload();
 });
 
 // ---------- Oversikt ----------
@@ -383,6 +389,55 @@ $("btn-test-push").addEventListener("click", async (e) => {
   }
   btn.disabled = false;
 });
+
+// ---------- Fildropp ----------
+
+// Filer brukeren har sendt rett hit (alle filtyper, ingen oversettelse), f.eks. noe som ikke ble riktig.
+async function loadDrops() {
+  const drops = (await api("/api/admin/drops")).drops || [];
+  const files = drops.reduce((n, d) => n + d.files.length, 0);
+  $("drops-count").textContent = drops.length
+    ? `${plural(files, "fil", "filer")}, ${formatBytes(drops.reduce((n, d) => n + d.files.reduce((m, f) => m + f.bytes, 0), 0))}`
+    : "";
+  fill($("drops"), drops.length
+    ? drops.map(dropCard)
+    : h("p", { class: "card muted" }, "Ingen filer i fildroppet. Det som slippes i «Fildropp» nederst på forsiden, havner her."));
+}
+
+function dropCard(d) {
+  const who = d.displayName || d.username || "Ukjent";
+  return h("article", { class: "card acard" },
+    h("div", { class: "acard-head" },
+      h("div", null,
+        h("h3", null, who, d.username && d.displayName !== d.username ? h("span", { class: "muted" }, ` (${d.username})`) : null),
+        h("p", { class: "muted small" }, [
+          d.sentAt ? `Sendt ${formatWhen(d.sentAt)}` : `Lastet opp ${formatWhen(d.createdAt)}`,
+          plural(d.files.length, "fil", "filer"),
+        ].join(" · "))),
+      d.sentAt ? pill("done", "Sendt") : pill("draft", "Ikke sendt")),
+    d.sentAt ? null : h("p", { class: "small muted" }, `${who} lastet opp filene, men trykket aldri Send (eller noe stoppet underveis).`),
+    d.note ? h("p", { class: "my-note" }, h("span", { class: "muted" }, `Melding fra ${who}: `), `«${d.note}»`) : null,
+    h("ul", { class: "afiles" }, d.files.map((f) => h("li", { class: "afile" },
+      extBadge(f.name),
+      h("div", { class: "afile-main" },
+        h("p", { class: "afile-name" }, f.name),
+        h("p", { class: "small muted" }, formatBytes(f.bytes))),
+      h("div", { class: "afile-actions" },
+        h("a", { class: "btn-quiet", href: `/api/admin/drop-files/${enc(f.id)}`, download: "" }, icon("download"), "Last ned"))))),
+    h("p", null, h("button", { type: "button", class: "btn-quiet", onclick: () => deleteDrop(d, who) }, icon("trash"), "Slett for godt")));
+}
+
+async function deleteDrop(d, who) {
+  const ok = await confirmDialog({
+    title: "Slette filene for godt?",
+    text: `${plural(d.files.length, "fil", "filer")} fra ${who} slettes fra serveren. Det kan ikke angres.`,
+    confirm: "Slett for godt",
+    danger: true,
+  });
+  if (ok) act(() => api(`/api/admin/drops/${enc(d.id)}`, { method: "DELETE" }), "Fildroppet er slettet.");
+}
+
+$("drops-refresh").addEventListener("click", () => load());
 
 // ---------- Sendinger ----------
 

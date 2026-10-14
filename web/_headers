@@ -1,0 +1,3 @@
+# Sider, skript og stiler sjekkes mot serveren hver gang (ETag, billig), så en ny versjon vises uten Shift+Cmd+R.
+/*
+  Cache-Control: no-cache

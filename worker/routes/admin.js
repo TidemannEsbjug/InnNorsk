@@ -9,7 +9,8 @@ import { logEvent, LEVELS } from "../log.js";
 import { fail, readJson, reqCtx, str, clamp } from "../http.js";
 import { USERNAME, requireAdmin, findUserByName, newSecret, normalizeUsername, revokeUserSessions } from "../auth.js";
 import { pushToUser } from "../apns.js";
-import { baseName, sanitizePath, r2Key, contentLength, sizeProblem, putBody } from "../files.js";
+import { baseName, sanitizePath, r2Key, contentLength, sizeProblem, putBody, download } from "../files.js";
+import { dropKey, listDrops, deleteDrop } from "../dropbox.js";
 import {
   listSendings, loadFile, markDone, finishIfDone, sendingView, startWorkflow, retainedFiles, purgeFiles,
 } from "../sendings.js";
@@ -249,6 +250,27 @@ admin.post("/sendings/:id/purge", async (c) => {
   if (!files.length) fail(409, "Det er ingen slettede filer å slette for godt i denne sendingen.");
   await purgeFiles(env, files, { reason: "admin", why: `av ${c.get("user").displayName}`, ctx: reqCtx(c) });
   return c.json({ sending: await sendingView(env, id, true, { withDeleted: true }) });
+});
+
+// Fildropp: filer Svetlana har sendt rett til eieren (også dropp hun aldri trykket Send på).
+admin.get("/drops", async (c) => c.json({ drops: await listDrops(c.env, { limit: clamp(c.req.query("limit"), 1, 500, 100) }) }));
+
+admin.get("/drop-files/:id", async (c) => {
+  const f = await one(c.env, "SELECT * FROM drop_files WHERE id = ? AND deleted_at IS NULL", c.req.param("id"));
+  if (!f) fail(404, "Fant ikke filen.");
+  const res = await download(c.env, dropKey(f.drop_id, f.id), f.name);
+  await logEvent(c.env, "info", "download.drop", `${f.name} lastet ned fra fildroppet`, { dropId: f.drop_id, dropFileId: f.id, bytes: f.bytes },
+    reqCtx(c));
+  return res;
+});
+
+admin.delete("/drops/:id", async (c) => {
+  const d = await one(c.env, "SELECT * FROM drops WHERE id = ? AND deleted_at IS NULL", c.req.param("id"));
+  if (!d) fail(404, "Fant ikke fildroppet.");
+  const files = await deleteDrop(c.env, d.id);
+  await logEvent(c.env, "info", "dropbox.deleted", `Fildropp slettet (${files === 1 ? "1 fil" : `${files} filer`})`, { dropId: d.id, files },
+    reqCtx(c));
+  return c.body(null, 204);
 });
 
 const notSentYet = (f) => f.status === "draft" || f.sending_status === "draft";

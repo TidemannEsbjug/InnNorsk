@@ -7,6 +7,7 @@ import authRoutes from "./routes/auth.js";
 import sendingRoutes from "./routes/sendings.js";
 import adminRoutes from "./routes/admin.js";
 import clientLogRoutes from "./routes/clientlog.js";
+import dropboxRoutes from "./routes/dropbox.js";
 
 const CSP = [
   "default-src 'self'",
@@ -31,6 +32,9 @@ app.use("*", async (c, next) => {
   res.headers.set("X-Frame-Options", "DENY");
   if (new URL(c.req.url).protocol === "https:") res.headers.set("Strict-Transport-Security", "max-age=31536000");
   if (c.req.path.startsWith("/api/") && !res.headers.has("Cache-Control")) res.headers.set("Cache-Control", "no-store");
+  // Hvilken deploy som svarer: en side som har stått åpen, laster seg selv inn på nytt når den endres (web/js/api.js).
+  const version = c.env.CF_VERSION_METADATA && c.env.CF_VERSION_METADATA.id;
+  if (version && c.req.path.startsWith("/api/")) res.headers.set("X-InnNorsk-Version", version);
   c.res = res;
 });
 
@@ -65,6 +69,7 @@ app.use("/api/*", async (c, next) => {
 app.route("/api/auth", authRoutes);
 app.route("/api/admin", adminRoutes);
 app.route("/api/client-log", clientLogRoutes);
+app.route("/api/dropbox", dropboxRoutes);
 app.route("/api", sendingRoutes);
 app.all("/api/*", (c) => c.json({ error: "Fant ikke dette API-et." }, 404));
 

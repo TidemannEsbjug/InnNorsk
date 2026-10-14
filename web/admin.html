@@ -31,6 +31,7 @@
     <div class="tabs" role="tablist" aria-label="Administrasjon">
       <button type="button" role="tab" id="tab-oversikt" aria-controls="panel-oversikt">Oversikt</button>
       <button type="button" role="tab" id="tab-sendinger" aria-controls="panel-sendinger">Sendinger</button>
+      <button type="button" role="tab" id="tab-fildropp" aria-controls="panel-fildropp">Fildropp</button>
       <button type="button" role="tab" id="tab-logg" aria-controls="panel-logg">Logg</button>
       <button type="button" role="tab" id="tab-okter" aria-controls="panel-okter">Økter</button>
       <button type="button" role="tab" id="tab-brukere" aria-controls="panel-brukere">Brukere</button>
@@ -87,6 +88,17 @@
       <input type="file" id="result-input" class="visually-hidden" tabindex="-1" aria-hidden="true" />
     </section>
 
+    <section class="panel" role="tabpanel" id="panel-fildropp" aria-labelledby="tab-fildropp" tabindex="-1" hidden>
+      <div class="notice notice-error panel-error" role="alert" hidden></div>
+      <div class="toolbar">
+        <p class="muted small" id="drops-count"></p>
+        <div class="toolbar-actions">
+          <button type="button" class="btn btn-secondary btn-small" id="drops-refresh">Oppdater</button>
+        </div>
+      </div>
+      <div id="drops"></div>
+    </section>
+
     <section class="panel" role="tabpanel" id="panel-logg" aria-labelledby="tab-logg" tabindex="-1" hidden>
       <div class="notice notice-error panel-error" role="alert" hidden></div>
       <form class="filters" id="log-filters">
@@ -133,6 +145,7 @@
         <option value="file."></option>
         <option value="sending."></option>
         <option value="download."></option>
+        <option value="dropbox."></option>
         <option value="client."></option>
         <option value="quota."></option>
         <option value="admin."></option>
@@ -163,6 +176,11 @@
         <option value="sending.purged"></option>
         <option value="download.result"></option>
         <option value="download.original"></option>
+        <option value="download.drop"></option>
+        <option value="dropbox.file"></option>
+        <option value="dropbox.sent"></option>
+        <option value="dropbox.rejected"></option>
+        <option value="dropbox.deleted"></option>
         <option value="client.page"></option>
         <option value="client.file_rejected"></option>
         <option value="client.upload_failed"></option>

@@ -27,6 +27,19 @@ function toLogin(status) {
   return true;
 }
 
+// Ny deploy mens siden står åpen: serveren sender X-InnNorsk-Version på hvert API-svar. Når den endres, kalles
+// handleren (hver gang, til siden er lastet inn på nytt); siden selv avgjør om det passer å laste inn nå.
+let version = null;
+let versionHandler = null;
+export function onNewVersion(fn) {
+  versionHandler = fn;
+}
+function checkVersion(v) {
+  if (!v) return;
+  if (version === null) version = v;
+  else if (v !== version && versionHandler) versionHandler();
+}
+
 export async function api(path, { method = "GET", body } = {}) {
   const headers = {};
   if (method !== "GET") headers["X-InnNorsk"] = "1";
@@ -43,6 +56,7 @@ export async function api(path, { method = "GET", body } = {}) {
     throw Object.assign(new Error(OFFLINE), { status: 0 });
   }
   if (toLogin(res.status)) throw failure(401, { error: "Du er logget ut. Logg inn på nytt." });
+  checkVersion(res.headers.get("X-InnNorsk-Version"));
   const data = parse(await res.text());
   if (!res.ok) throw failure(res.status, data);
   return data;

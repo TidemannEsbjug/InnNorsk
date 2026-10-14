@@ -1,8 +1,9 @@
 import {
   api, upload, h, fill, icon, extBadge, baseName, dirName, extOf, plural, formatBytes, formatClock, formatDuration,
   dayLabel, LANGUAGE_LABELS, remember, recall, confirmDialog, toast, logout, reportErrors, initMenu,
-  changePassword, passwordProblem, track, trackPage,
+  changePassword, passwordProblem, track, trackPage, onNewVersion,
 } from "./api.js";
+import { inFildropp, fildroppIdle } from "./fildropp.js";
 
 reportErrors();
 initMenu();
@@ -898,6 +899,11 @@ window.addEventListener("dragleave", (e) => {
 window.addEventListener("dragover", (e) => {
   if (!hasFiles(e)) return;
   e.preventDefault();
+  if (inFildropp(e)) {
+    dragging(false);
+    return;
+  }
+  dragging(true);
   e.dataTransfer.dropEffect = state.sending ? "none" : "copy";
 });
 window.addEventListener("drop", (e) => {
@@ -905,6 +911,7 @@ window.addEventListener("drop", (e) => {
   e.preventDefault();
   dragDepth = 0;
   dragging(false);
+  if (inFildropp(e)) return; // fildroppet tar dem selv (web/js/fildropp.js)
   if (state.sending) {
     reportBusy([...e.dataTransfer.files]);
     return;
@@ -943,6 +950,12 @@ $("welcome-go").addEventListener("click", (e) => {
   first.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
   const link = first.querySelector(".btn-download");
   if (link) link.focus({ preventScroll: true });
+});
+
+// Ny versjon ute: last inn på nytt med én gang hun ikke holder på med noe (spørres hver gang listen hentes).
+onNewVersion(() => {
+  const busy = state.sending || state.queue.length || !fildroppIdle() || $("note").value.trim() || document.querySelector("dialog[open]");
+  if (!busy) location.reload();
 });
 
 window.addEventListener("beforeunload", (e) => {

@@ -807,6 +807,64 @@ textarea:disabled {
   margin-top: 16px;
 }
 
+/* ---------- Fildropp (filer rett til eieren) ---------- */
+
+.fildropp > .muted {
+  margin: -4px 0 16px;
+}
+
+.drop.drop-small {
+  padding: 20px 16px;
+  gap: 10px;
+}
+
+.drop-small .drop-title {
+  font-size: 19px;
+}
+
+.fildropp-more {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
+  justify-items: start;
+}
+
+.fildropp-more .field {
+  justify-self: stretch;
+}
+
+#fildropp-error {
+  margin-top: 16px;
+}
+
+.fildropp-done {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--success-soft);
+  border: 1px solid var(--success-line);
+  color: var(--success-ink);
+  font-weight: 600;
+}
+
+.fildropp-history-title {
+  margin: 22px 0 8px;
+  font-size: 16px;
+}
+
+.fildropp-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
 .queue {
   list-style: none;
   margin: 16px 0 0;
