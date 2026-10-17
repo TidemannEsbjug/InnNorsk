@@ -32,7 +32,7 @@
   "vars": {
     "MAX_FILE_MB": "25",
     "MAX_FILES_PER_SENDING": "50",
-    "MAX_CHARS_PER_DAY": "300000",
+    "MAX_CHARS_PER_DAY": "2000000",
     "MAX_CHARS_PER_MONTH": "2000000",
     "MAX_STORAGE_GB": "5",
     "RETAIN_DELETED_DAYS": "30",
