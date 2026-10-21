@@ -28,6 +28,30 @@ test("feil antall i svaret deles opp i stedet for å velte filen", async () => {
   assert.deepEqual(out, strings.map((s) => mock.transform(s)));
 });
 
+test("en batch som kommer tilbake uoversatt, spørres på nytt med tydeligere beskjed (bare tekst som ikke er norsk)", async () => {
+  mock.setMode("echo");
+  const strings = [
+    "Digital Investigation 18 (2016)",
+    "Anti-forensic tools, techniques and methods are becoming a formidable obstacle.",
+    "Digital forensics has garnered much attention over the past ten years.",
+    "Dette er en setning som allerede er på norsk og ikke skal sendes på nytt.",
+  ];
+  const warnings = [];
+  const out = await translateStrings(ctx({ strings, onWarning: (w) => warnings.push(w) }));
+  assert.deepEqual(out, [strings[0], mock.transform(strings[1]), mock.transform(strings[2]), strings[3]]);
+  assert.equal(mock.state.calls, 2);
+  assert.match(mock.state.requests[1].input, /Teksten er ikke på norsk/);
+  assert.deepEqual(JSON.parse(mock.state.requests[1].input.slice(mock.state.requests[1].input.indexOf("\n\n[") + 2)), strings.slice(1, 3));
+  assert.deepEqual(warnings, []);
+
+  mock.setMode("echoalways");
+  mock.reset();
+  const again = await translateStrings(ctx({ strings, onWarning: (w) => warnings.push(w) }));
+  assert.deepEqual(again, strings);
+  assert.equal(mock.state.calls, 2);
+  assert.deepEqual(warnings.map((w) => [w.code, w.index]), [["untranslated", 1]]);
+});
+
 test("429 og 503 prøves på nytt", async () => {
   for (const mode of ["flaky429", "flaky500"]) {
     mock.setMode(mode);

@@ -14,7 +14,7 @@ Cloudflare har **ingen hard utgiftsgrense** på Workers Paid; alt over det inklu
 | Variabel | Standard | Betyr |
 |---|---|---|
 | `MAX_CHARS_PER_DAY` | 2000000 | tegn som kan sendes til oversettelse siste 24 t (ca. 800 sider à 2500 tegn; en tett 169-siders PDF var 1,35 mill.) |
-| `MAX_CHARS_PER_MONTH` | 2000000 | tegn siste 30 dager (ca. 800 sider) |
+| `MAX_CHARS_PER_MONTH` | 10000000 | tegn siste 30 dager (ca. 4000 sider) |
 | `MAX_STORAGE_GB` | 5 | samlet lagring (originaler + oversettelser, også slettede som ikke er slettet for godt ennå), godt under R2-gratiskvoten på 10 GB |
 | `RETAIN_DELETED_DAYS` | 30 | hvor lenge du kan laste ned filer Svetlana har slettet, før cron sletter dem for godt |
 

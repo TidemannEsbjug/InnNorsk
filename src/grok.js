@@ -275,10 +275,15 @@ function parseJsonArray(text, expected) {
   return parsed.map((item) => (item == null ? "" : String(item)));
 }
 
-function batchPrompt(label, payload) {
+// Sier fra når forrige svar lot vanlig tekst stå uoversatt (se translateBatch).
+const INSIST_LINE =
+  "Viktig: Teksten er ikke på norsk og skal oversettes, også titler, sammendrag, nøkkelord og innledning. Bare navn, tall, URL-er og koder står uendret.";
+
+function batchPrompt(label, payload, insist) {
   return [
     `Du er en profesjonell oversetter til ${label}.`,
     "Oversett hvert element i JSON-arrayen til naturlig, idiomatisk norsk.",
+    ...(insist ? [INSIST_LINE] : []),
     "Behold layouten: samme antall linjeskift, tomme linjer, tabulatorer og innrykk som i kilden.",
     "Direkte oversettelse. Ikke omskriv, ikke forkort, ikke utvid, og ikke endre typografi.",
     "Ikke slå sammen avsnitt eller linjer. Ikke legg til markdown, punktlister eller overskrifter som ikke finnes i kilden.",
@@ -291,10 +296,11 @@ function batchPrompt(label, payload) {
   ].join("\n");
 }
 
-function singlePrompt(label, text) {
+function singlePrompt(label, text, insist) {
   return [
     `Du er en profesjonell oversetter til ${label}.`,
     "Oversett teksten under til naturlig, idiomatisk norsk. Direkte oversettelse.",
+    ...(insist ? [INSIST_LINE] : []),
     "Behold linjeskift, tabulatorer og innrykk nøyaktig. Behold tall, egennavn, URL-er og koder.",
     "Merkene ⟦1⟧…⟦/1⟧ (også ⟦2⟧ osv., samme nummer kan komme flere ganger) markerer tekst med egen formatering eller plassering: behold alle merkene uendret, rundt de tilsvarende oversatte ordene.",
     "Returner KUN den oversatte teksten, uten anførselstegn, forklaringer eller markdown.",
@@ -304,7 +310,7 @@ function singlePrompt(label, text) {
 }
 
 async function requestArray(ctx, label, texts) {
-  const prompt = batchPrompt(label, texts);
+  const prompt = batchPrompt(label, texts, ctx.insist);
   try {
     return parseJsonArray(await requestWithRetry(ctx, prompt, texts.length), texts.length);
   } catch (err) {
@@ -322,7 +328,7 @@ async function translateTexts(ctx, label, texts) {
   } catch (err) {
     if (!(err instanceof GrokError) || err.code !== "bad_response") throw err;
     if (texts.length === 1) {
-      const text = await requestWithRetry(ctx, singlePrompt(label, texts[0]), 1);
+      const text = await requestWithRetry(ctx, singlePrompt(label, texts[0], ctx.insist), 1);
       return [text.replace(/^```\w*\s*|\s*```$/g, "")];
     }
     const mid = Math.ceil(texts.length / 2);
@@ -332,11 +338,54 @@ async function translateTexts(ctx, label, texts) {
   }
 }
 
+// Vanlig tekst (minst 4 ord) som ikke er norsk fra før; navn, tall, URL-er og korte etiketter står gjerne uendret.
+const NORWEGIAN_WORDS = new Set("og er som det ikke på til med av en et for har de jeg vi kan om å var seg den også eller".split(" "));
+function needsTranslation(text) {
+  const words = String(text).toLowerCase().match(/\p{L}{2,}/gu) || [];
+  if (words.length < 4) return false;
+  return words.filter((w) => NORWEGIAN_WORDS.has(w)).length / words.length < 0.15;
+}
+
+const squash = (s) => String(s).replace(/\s+/g, " ").trim();
+
+// Oversettelsen er uendret fra kilden for mer enn halvparten av teksten som skulle oversettes. Modellen lar av og til en
+// hel batch stå på originalspråket uten feil (f.eks. forsiden av en artikkel med tidsskriftshode, tittel og nøkkelord).
+function echoed(texts, translated) {
+  let total = 0;
+  let same = 0;
+  const idx = [];
+  texts.forEach((t, n) => {
+    if (!needsTranslation(t)) return;
+    total += t.length;
+    if (squash(translated[n]) !== squash(t)) return;
+    same += t.length;
+    idx.push(n);
+  });
+  return same * 2 > total ? idx : [];
+}
+
 // items: [{ i, t }] fra planBatches. Returnerer oversettelser i samme rekkefølge.
 async function translateBatch(items, ctx) {
   const label = LANGUAGE_LABEL[ctx.targetLanguage] || LANGUAGE_LABEL.bokmal;
   const texts = items.map((it) => it.t);
   const translated = await translateTexts(ctx, label, texts);
+  // Uoversatt: de tekstbitene spørres én gang til, alene og med tydeligere beskjed.
+  const again = echoed(texts, translated);
+  if (again.length) {
+    const retried = await translateTexts({ ...ctx, insist: true }, label, again.map((n) => texts[n]));
+    let left = 0;
+    again.forEach((n, k) => {
+      if (squash(retried[k]) === squash(texts[n])) left++;
+      else if (String(retried[k]).trim()) translated[n] = retried[k];
+    });
+    if (left && ctx.onWarning) {
+      ctx.onWarning({
+        code: "untranslated",
+        message: `${left} tekstbit(er) kom tilbake uoversatt fra Grok, også etter nytt forsøk.`,
+        index: items[again[0]].i,
+      });
+    }
+  }
   return translated.map((t, n) => {
     if (!String(t).trim() && texts[n].trim()) {
       if (ctx.onWarning) {

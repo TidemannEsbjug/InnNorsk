@@ -9,6 +9,8 @@
 //   fail403   alle kall svarer 403 { error: "string" } (som en voice-nøkkel)
 //   slow      som upper, men venter opts.delayMs (standard 200 ms)
 //   spacedmarks som upper, men merkene skrives med mellomrom inni: ⟦ 1 ⟧…⟦ /1 ⟧ (slik en modell kan gjøre)
+//   echo      arrayen kommer tilbake uoversatt, med mindre prompten insisterer (som upper da)
+//   echoalways arrayen kommer alltid tilbake uoversatt
 // respond() lager svaret og brukes også av den falske HTTP-serveren (mock-xai-server.js).
 const realFetch = global.fetch;
 const state = { mode: "upper", delayMs: 200, calls: 0, strings: 0, chars: 0, requests: [] };
@@ -63,7 +65,8 @@ function respond(st, body) {
   } else {
     st.strings += arr.length;
     st.chars += arr.reduce((acc, s) => acc + String(s).length, 0);
-    let out = arr.map(transform);
+    const insist = /Teksten er ikke på norsk og skal oversettes/.test(String(body.input || ""));
+    let out = mode === "echoalways" || (mode === "echo" && !insist) ? arr.map(String) : arr.map(transform);
     if (mode === "mismatch" && out.length > 1 && n % 2 === 1) out = out.slice(0, -1);
     if (mode === "spacedmarks") out = out.map((s) => s.replace(/⟦(\/?)(\d+)⟧/g, "⟦ $1$2 ⟧"));
     text = JSON.stringify(out);
