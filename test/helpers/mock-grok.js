@@ -10,7 +10,8 @@
 //   slow      som upper, men venter opts.delayMs (standard 200 ms)
 //   spacedmarks som upper, men merkene skrives med mellomrom inni: ⟦ 1 ⟧…⟦ /1 ⟧ (slik en modell kan gjøre)
 //   echo      arrayen kommer tilbake uoversatt, med mindre prompten insisterer (som upper da)
-//   echoalways arrayen kommer alltid tilbake uoversatt
+//   echoalways arrayen og enkeltstrenger kommer alltid tilbake uoversatt
+//   echobatch arrayen kommer alltid tilbake uoversatt; enkeltstrenger oversettes (som upper)
 // respond() lager svaret og brukes også av den falske HTTP-serveren (mock-xai-server.js).
 const realFetch = global.fetch;
 const state = { mode: "upper", delayMs: 200, calls: 0, strings: 0, chars: 0, requests: [] };
@@ -61,12 +62,12 @@ function respond(st, body) {
   if (!arr) {
     // Enkeltstreng-/tilkoblingsprompt: returner "OK" eller oversett siste linje.
     const m = String(body.input || "").match(/\n\n([\s\S]+)$/);
-    text = /nøyaktig ett ord: OK/i.test(body.input) ? "OK" : transform(m ? m[1] : "OK");
+    text = /nøyaktig ett ord: OK/i.test(body.input) ? "OK" : mode === "echoalways" && m ? m[1] : transform(m ? m[1] : "OK");
   } else {
     st.strings += arr.length;
     st.chars += arr.reduce((acc, s) => acc + String(s).length, 0);
     const insist = /Teksten er ikke på norsk og skal oversettes/.test(String(body.input || ""));
-    let out = mode === "echoalways" || (mode === "echo" && !insist) ? arr.map(String) : arr.map(transform);
+    let out = mode === "echoalways" || mode === "echobatch" || (mode === "echo" && !insist) ? arr.map(String) : arr.map(transform);
     if (mode === "mismatch" && out.length > 1 && n % 2 === 1) out = out.slice(0, -1);
     if (mode === "spacedmarks") out = out.map((s) => s.replace(/⟦(\/?)(\d+)⟧/g, "⟦ $1$2 ⟧"));
     text = JSON.stringify(out);

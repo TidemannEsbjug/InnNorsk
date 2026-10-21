@@ -346,6 +346,7 @@ function needsTranslation(text) {
   return words.filter((w) => NORWEGIAN_WORDS.has(w)).length / words.length < 0.15;
 }
 
+const ECHO_SINGLES = 15;
 const squash = (s) => String(s).replace(/\s+/g, " ").trim();
 
 // Oversettelsen er uendret fra kilden for mer enn halvparten av teksten som skulle oversettes. Modellen lar av og til en
@@ -369,20 +370,30 @@ async function translateBatch(items, ctx) {
   const label = LANGUAGE_LABEL[ctx.targetLanguage] || LANGUAGE_LABEL.bokmal;
   const texts = items.map((it) => it.t);
   const translated = await translateTexts(ctx, label, texts);
-  // Uoversatt: de tekstbitene spørres én gang til, alene og med tydeligere beskjed.
+  // Uoversatt: de tekstbitene spørres én gang til, alene og med tydeligere beskjed. Det som fortsatt står uendret
+  // (høyst ECHO_SINGLES), sendes én og én uten JSON-arrayen rundt.
   const again = echoed(texts, translated);
   if (again.length) {
+    const take = (n, t) => {
+      const ok = String(t).trim() && squash(t) !== squash(texts[n]);
+      if (ok) translated[n] = t;
+      return !ok;
+    };
     const retried = await translateTexts({ ...ctx, insist: true }, label, again.map((n) => texts[n]));
-    let left = 0;
-    again.forEach((n, k) => {
-      if (squash(retried[k]) === squash(texts[n])) left++;
-      else if (String(retried[k]).trim()) translated[n] = retried[k];
-    });
-    if (left && ctx.onWarning) {
+    let left = again.filter((n, k) => take(n, retried[k]));
+    if (left.length <= ECHO_SINGLES) {
+      const alone = [];
+      for (const n of left) {
+        const text = await requestWithRetry(ctx, singlePrompt(label, texts[n], true), 1);
+        if (take(n, text.replace(/^```\w*\s*|\s*```$/g, ""))) alone.push(n);
+      }
+      left = alone;
+    }
+    if (left.length && ctx.onWarning) {
       ctx.onWarning({
         code: "untranslated",
-        message: `${left} tekstbit(er) kom tilbake uoversatt fra Grok, også etter nytt forsøk.`,
-        index: items[again[0]].i,
+        message: `${left.length} tekstbit(er) kom tilbake uoversatt fra Grok, også etter nye forsøk.`,
+        index: items[left[0]].i,
       });
     }
   }

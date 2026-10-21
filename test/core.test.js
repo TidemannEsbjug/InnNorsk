@@ -5,7 +5,7 @@ const mock = require("./helpers/mock-grok");
 const { minimalDocx, minimalPdf } = require("./helpers/fixtures");
 const { translateStrings, planBatches, GrokError } = require("../src/grok");
 const core = require("../src/core");
-const { extractPages, layoutPage, stripText, wordsOf, untag } = require("../src/formats/pdf");
+const { extractPages, layoutPage, stripText, wordsOf, tagged, untag } = require("../src/formats/pdf");
 
 const ctx = (extra = {}) => ({ apiKey: "test", model: "grok-4.6", retryDelayMs: 1, ...extra });
 
@@ -48,8 +48,18 @@ test("en batch som kommer tilbake uoversatt, spørres på nytt med tydeligere be
   mock.reset();
   const again = await translateStrings(ctx({ strings, onWarning: (w) => warnings.push(w) }));
   assert.deepEqual(again, strings);
-  assert.equal(mock.state.calls, 2);
+  assert.equal(mock.state.calls, 4);
   assert.deepEqual(warnings.map((w) => [w.code, w.index]), [["untranslated", 1]]);
+
+  // Uendret også i den nye batchen: hver tekstbit sendes alene, uten JSON-arrayen.
+  mock.setMode("echobatch");
+  mock.reset();
+  warnings.length = 0;
+  const alone = await translateStrings(ctx({ strings, onWarning: (w) => warnings.push(w) }));
+  assert.deepEqual(alone, [strings[0], mock.transform(strings[1]), mock.transform(strings[2]), strings[3]]);
+  assert.equal(mock.state.calls, 4);
+  assert.ok(mock.state.requests.slice(2).every((r) => !r.input.includes("\n\n[") && /Teksten er ikke på norsk/.test(r.input)));
+  assert.deepEqual(warnings, []);
 });
 
 test("429 og 503 prøves på nytt", async () => {
@@ -335,6 +345,12 @@ test("PDF: stilmerker tolkes, ubalanserte merker gir vanlig tekst, tall med mell
   const bold = { family: "sans", size: 11, bold: true };
   assert.deepEqual(untag("A ⟦1⟧b c⟦/1⟧ d", base, [bold]).map((p) => [p.text, p.style === bold]), [["A ", false], ["b c", true], [" d", false]]);
   assert.deepEqual(untag("A ⟦1⟧b c d", base, [bold]), [{ text: "A b c d", style: base }]);
+  // Ligaturer fra en egen skrift (Elsevier) inne i et ord merkes ikke; et uthevet ord gjør det fortsatt.
+  const lig = { family: "serif-lig", size: 11 };
+  const run = (text, style = base) => ({ text, style });
+  assert.equal(tagged([run("Scienti"), run("fi", lig), run("cally valid, "), run("fl", lig), run("ow and "), run("st", bold), run(" end")], base).text,
+    "Scientifically valid, flow and ⟦1⟧st⟦/1⟧ end");
+  assert.equal(tagged([run("A "), run("fine", bold), run(" day")], base).text, "A ⟦1⟧fine⟦/1⟧ day");
   const words = wordsOf([{ text: "Sum ⟦1⟧61⟦/1⟧ % er 1 874 kr", style: base, styles: [bold] }]);
   assert.deepEqual(words.map((w) => w.pieces.map((p) => p.text).join("|") + (w.glue ? "+" : "")), ["Sum", "61", "%+", "er", "1", "874+", "kr+"]);
   const glued = (text) => wordsOf([{ text, style: base }]).map((w) => (w.glue ? "+" : "|") + w.pieces[0].text).join("");

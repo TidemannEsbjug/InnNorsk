@@ -1530,11 +1530,20 @@ function hardBreak(block, prev, line) {
 }
 
 // Uthevede ord (annen stil enn avsnittets) sendes som ⟦1⟧…⟦/1⟧ og tegnes med sin stil etter oversettelsen.
+// En ligatur (fi, fl, ff …) fra en egen skrift inntil en bokstav er en del av ordet, ikke utheving: Scienti⟦1⟧fi⟦/1⟧cally
+// gjør ordet uleselig for modellen.
+const LIGATURE = /^(?:f[fil]|ff[il]|[fs]t|[ﬀ-ﬆ])$/i;
+function inWord(runs, i, text) {
+  if (!LIGATURE.test(runs[i].text)) return false;
+  const next = runs[i + 1] ? runs[i + 1].text : "";
+  return /\p{L}$/u.test(text) || /^\p{L}/u.test(next);
+}
+
 function tagged(runs, base) {
   const styles = [];
   let text = "";
-  for (const r of runs) {
-    if (lookKey(r.style) === lookKey(base) || !/[\p{L}\p{N}]/u.test(r.text)) {
+  for (const [i, r] of runs.entries()) {
+    if (lookKey(r.style) === lookKey(base) || !/[\p{L}\p{N}]/u.test(r.text) || inWord(runs, i, text)) {
       text += r.text;
       continue;
     }
@@ -3816,4 +3825,4 @@ async function translatePdf(buffer, ctx) {
   return writePdf(buffer, pages, blocksPerPage, { ...ctx, fits });
 }
 
-module.exports = { translatePdf, extractPages, layoutPage, stripText, wordsOf, untag, sharedImagePolicy };
+module.exports = { translatePdf, extractPages, layoutPage, stripText, wordsOf, tagged, untag, sharedImagePolicy };
